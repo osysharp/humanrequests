@@ -1,0 +1,158 @@
+// Osysharp.HumanRequests — who may do what. A request is answered only by who was asked, and never by who asked;
+// it is read by the people it concerns; it is made, answered, used and timed only through the kit's own functions.
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+using Osysharp.HumanRequests;
+using Osysharp.Workflow;
+using Boatyard;
+
+[Test(Yard)]
+void only_who_was_asked_answers() {
+  Guid id = Guid.Empty;
+  runas (Edvin) { id = AskApproval(KeelBolts(), PersonNamed("Marit")).Id; }
+  // Joel works the same queue, and the request is not put to him: he does not even read it.
+  runas (Joel) {
+    Assert.Equal(0, HumanRequest.Count());
+    Assert.Equal(0, Requests.Mine().Count);
+  }
+  // Henrik oversees requests, so he reads it — and reading is not being asked.
+  runas (Henrik) {
+    var refused = Assert.Throws<RequestRefused>(() => AnswerRequest(TheRequest(id), RequestAnswer.Approve()));
+    Assert.Equal("This request is not put to you. It waits for Marit Lund.", refused.Message);
+    Assert.Equal(RequestStatus.Open, TheRequest(id).Status);
+  }
+  // The person asked answers.
+  runas (Marit) { Assert.True(AnswerRequest(TheRequest(id), RequestAnswer.Approve()).Applied); }
+}
+
+/// Four eyes: whoever asked for an approval cannot give it — not when it is put to somebody else, and not when it is
+/// put to the queue they work themselves.
+[Test(Yard)]
+void whoever_asked_cannot_answer_their_own_request() {
+  runas (Edvin) {
+    var theirs = AskApproval(KeelBolts(), PersonNamed("Marit"));
+    var refused = Assert.Throws<RequestRefused>(() => AnswerRequest(theirs, RequestAnswer.Approve()));
+    Assert.Equal("You asked this, so it is not yours to answer. It waits for Marit Lund.", refused.Message);
+    var open = AskTheYard("May the travel lift run on Saturday?");
+    Workflow.Settle(open);                              // it has arrived in the yard's queue
+    var own = Assert.Throws<RequestRefused>(() => AnswerRequest(open, RequestAnswer.Say("Yes.")));
+    Assert.Equal("You asked this, so it is not yours to answer. It waits for the people of Yard.", own.Message);
+    // Asking oneself is refused the same way: the answer would be nobody's second pair of eyes.
+    var self = AskApproval(KeelBolts(), PersonNamed("Edvin"));
+    Assert.Throws<RequestRefused>(() => AnswerRequest(self, RequestAnswer.Approve()));
+    Assert.Equal(0, HumanRequest.Count(r => r.Status == RequestStatus.Answered));
+  }
+}
+
+// Each of the four below is one write the kit keeps to itself — one test each, so each guard has its own witness.
+
+[Test(Yard)]
+[runas(Edvin)]
+void a_request_is_made_only_by_putting_it() {
+  Assert.Denied(() => { ForgeRequest(PersonNamed("Marit")); UnitOfWork.Commit(); });
+  UnitOfWork.Discard();
+  Assert.Equal(0, HumanRequest.Count());
+}
+
+/// The person asked may answer — through `AnswerRequest`. Writing the answer onto the row is not hers either.
+[Test(Yard)]
+void an_answer_is_written_only_by_answering() {
+  Guid id = Guid.Empty;
+  runas (Edvin) { id = AskApproval(KeelBolts(), PersonNamed("Marit")).Id; }
+  runas (Marit) {
+    Assert.Denied(() => { ForgeAnswer(TheRequest(id)); UnitOfWork.Commit(); });
+    UnitOfWork.Discard();
+    Assert.Equal(RequestStatus.Open, TheRequest(id).Status);
+    Assert.Equal("", TheRequest(id).Choice);
+  }
+}
+
+[Test(Yard)]
+void a_requests_time_is_changed_only_by_extending_it() {
+  Guid id = Guid.Empty;
+  runas (Edvin) { id = AskApproval(KeelBolts(), PersonNamed("Marit"), TimeSpan.FromHours(8)).Id; }
+  runas (Marit) {
+    Assert.Denied(() => { ForgeTime(TheRequest(id)); UnitOfWork.Commit(); });
+    UnitOfWork.Discard();
+    Assert.Equal(TimeSpan.FromHours(8), TheRequest(id).AnswerWithin);
+  }
+}
+
+/// Used once. Wiping the mark so the approval could be used again is nobody's to do.
+[Test(Yard)]
+void an_approvals_use_is_marked_only_by_using_it() {
+  Guid id = Guid.Empty;
+  runas (Edvin) { id = AskApproval(KeelBolts(), PersonNamed("Marit")).Id; }
+  runas (Marit) { AnswerRequest(TheRequest(id), RequestAnswer.Approve()); }
+  runas (Edvin) { SendQuote(KeelBolts(), TheRequest(id)); }
+  runas (Edvin) {
+    Assert.Denied(() => { ForgeUse(TheRequest(id)); UnitOfWork.Commit(); });
+    UnitOfWork.Discard();
+    Assert.NotNull(TheRequest(id).ActedAt);
+  }
+}
+
+[Test(Yard)]
+void calling_a_request_off_is_its_askers_and_the_overseers() {
+  Guid id = Guid.Empty;
+  runas (Edvin) { id = AskApproval(KeelBolts(), PersonNamed("Marit")).Id; }
+  runas (Marit) {
+    var refused = Assert.Throws<RequestRefused>(() => CancelRequest(TheRequest(id), "Not today."));
+    Assert.Equal("Only whoever asked, or whoever oversees requests, may call it off.", refused.Message);
+  }
+  runas (Edvin) {
+    Assert.Throws<ValidationException>(() => CancelRequest(TheRequest(id), ""));
+    CancelRequest(TheRequest(id), "The owner withdrew the job.");
+    Workflow.Settle(TheRequest(id));
+    Assert.Equal(RequestStatus.Cancelled, TheRequest(id).Status);
+  }
+  Background.Settle();
+  runas (Edvin) { Assert.Equal(1, Heard.Count(h => h.What == "called off" && h.About == "The owner withdrew the job.")); }
+  // A second request, called off by whoever oversees them.
+  runas (Edvin) { id = AskWhichSlip(Tern(), PersonNamed("Marit")).Id; }
+  runas (Henrik) {
+    CancelRequest(TheRequest(id), "Tern is not coming in.");
+    Assert.Equal(RequestStatus.Cancelled, TheRequest(id).Status);
+  }
+}
+
+/// Somebody who may not put requests puts none — and a request names nobody as its asker but who was signed in.
+[Test(Yard)]
+void who_asked_is_read_from_who_is_signed_in() {
+  runas (Signe) {
+    var request = PutRequest(new NewRequest { To = PersonNamed("Edvin"), Title = "Is the crane free at two?", AskedByName = "" });
+    Assert.Equal("Signe Holm", request.AskedBy!.DisplayName);
+    Assert.Equal(AskerKind.Person, request.AskedByKind);
+  }
+}
+
+/// ⭐ WHOEVER RAN IT IS TOLD WHY. A refusal of the kit's is a refusal, not a fault: run as an action — by a rule, an
+/// endpoint, a model's tool — the caller gets the kit's own sentence, and the request is as it was.
+[Test(Yard)]
+void a_refusal_reaches_whoever_ran_it_as_an_action_in_the_kits_own_words() {
+  Guid id = Guid.Empty;
+  runas (Edvin) { id = AskApproval(KeelBolts(), PersonNamed("Marit")).Id; UnitOfWork.Commit(); }
+  runas (Henrik) {
+    var result = Actions.Run(Actions.Of(ApproveRequest).Name, [new ActionValue { Parameter = "request", Value = id.ToString() }]);
+    Assert.Equal("Invalid: This request is not put to you. It waits for Marit Lund.", result.Outcome.Name + ": " + result.Problem);
+    Assert.Equal(RequestStatus.Open, TheRequest(id).Status);
+  }
+}
+
+/// ⭐ FOUR EYES, SAID BY WHOEVER ASKS. A request put to a queue names somebody who may not answer it — the person whose
+/// own request it decides. She works that queue, and may take the item: the answer is still not hers. Anybody else
+/// who works it answers.
+[Test(Yard)]
+void a_request_is_not_answered_by_whoever_it_says_may_not() {
+  Guid id = Guid.Empty;
+  runas (Edvin) {
+    id = AskTheYardNotBy("May Marit's own overtime be paid?", PersonNamed("Marit")).Id;
+    Workflow.Settle(TheRequest(id));
+  }
+  runas (Marit) {
+    var refused = Assert.Throws<RequestRefused>(() => AnswerRequest(TheRequest(id), RequestAnswer.Say("Yes.")));
+    Assert.Equal("This decides something that was asked for you, so it is not yours to answer. It waits for the people of Yard.", refused.Message);
+    Assert.Equal(RequestStatus.Open, TheRequest(id).Status);
+  }
+  runas (Joel) { Assert.True(AnswerRequest(TheRequest(id), RequestAnswer.Say("Yes.")).Applied); }
+}

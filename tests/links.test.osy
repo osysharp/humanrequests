@@ -1,0 +1,147 @@
+// Osysharp.HumanRequests — somebody with no account. Tern's owner is asked for her papers through a link: the link
+// opens that one request and nothing else, an answer through it is recorded with how its sender was known, and an
+// answer that comes after the request was called off or ran out of time is kept and changes nothing.
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+using Osysharp.HumanRequests;
+using Osysharp.Workflow;
+using Boatyard;
+
+/// Put the request for Tern's papers; answers the text of its link, as the mail to her owner would carry it.
+string PapersLink(TimeSpan? expireAfter = null) {
+  var link = "";
+  runas (Edvin) {
+    var request = AskForPapers(Tern(), TimeSpan.FromDays(2), expireAfter);
+    Workflow.Settle(request);
+    link = AnswerLinkFor(request);
+  }
+  return link;
+}
+
+Dictionary<string, string> AinosPapers() {
+  return new Dictionary<string, string> { ["Registration"] = "FIN-A-40821", ["LengthMetres"] = "9.4", ["Insured"] = "true", ["Notes"] = "The mast step is soft." };
+}
+
+[Test(Yard)]
+void somebody_with_no_account_answers_through_their_link() {
+  var link = PapersLink();
+  Assert.StartsWith("g1.", link);
+
+  // Nobody is signed in. The link shows its holder the one request: what is asked, by whom, and its fields.
+  var view = ViewByLink(AnswerLink.From(link));
+  Assert.Equal("The papers for Tern", view.Title);
+  Assert.Equal("Edvin Strand", view.AskedBy);
+  Assert.Equal("Aino Saarela", view.AskedOf);
+  Assert.True(view.MayAnswer);
+  Assert.Equal(["Registration", "Length metres", "Insured", "Notes"], view.Fields.Select(f => f.Label).ToList());
+  // …and nothing else, and only for that call: outside it they are a visitor like any other, and read no row at all.
+  Assert.Equal(0, HumanRequest.Count());
+  Assert.Equal(0, Boat.Count());
+  Assert.Equal(0, Quote.Count());
+
+  var bad = Assert.Throws<ValidationException>(() => AnswerByLink(AnswerLink.From(link), new RequestAnswer { Values = new Dictionary<string, string> { ["Registration"] = "FIN-A-40821" } }, "Aino Saarela"));
+  Assert.Equal("“Length metres” is needed.", bad.Message);
+  var result = AnswerByLink(AnswerLink.From(link), new RequestAnswer { Values = AinosPapers() }, "Aino Saarela");
+  Assert.True(result.Applied);
+  Assert.Equal("Thank you. Your answer has been passed on.", result.Said);
+  Background.Settle();
+
+  runas (Edvin) {
+    var request = HumanRequest.Single();
+    Workflow.Settle(request);
+    Assert.Equal(RequestStatus.Answered, request.Status);
+    var outcome = OutcomeOf(request);
+    // Recorded with who they said they were, and how they were known: by holding the link.
+    Assert.Equal("Aino Saarela", outcome.ByName);
+    Assert.Null(outcome.By);
+    Assert.Equal(Assurance.Link, outcome.With);
+    Assert.Equal("The mast step is soft.", outcome.As<BoatPapers>().Notes);
+    Assert.Equal("FIN-A-40821", Tern().Registration);
+    Assert.True(Tern().Insured);
+    Assert.Equal("Registration: FIN-A-40821\nLength metres: 9.4\nInsured: Yes\nNotes: The mast step is soft.", ViewRequest(request.Id)!.Answer);
+  }
+}
+
+/// A request sent outside is answered by the holder of its link and by nobody inside — and a request put to
+/// somebody inside has no link at all.
+[Test(Yard)]
+void a_request_sent_outside_is_answered_only_through_its_link() {
+  var link = PapersLink();
+  runas (Henrik) {
+    var request = HumanRequest.Single();
+    var refused = Assert.Throws<RequestRefused>(() => AnswerRequest(request, new RequestAnswer { Values = AinosPapers() }));
+    Assert.Equal("This request was sent to Aino Saarela, who answers it through the link they were sent.", refused.Message);
+    Assert.False(ViewRequest(request.Id)!.MayAnswer);
+  }
+  runas (Edvin) {
+    var inside = AskWhichSlip(Tern(), PersonNamed("Marit"));
+    var none = Assert.Throws<RequestRefused>(() => AnswerLinkFor(inside));
+    Assert.Contains("A link is for a request with an `OutsideEmail`", none.Message);
+  }
+  // Only whoever asked, or whoever oversees requests, is handed the link.
+  runas (Marit) { Assert.Equal(0, HumanRequest.Count(r => r.OutsideEmail != "")); }
+}
+
+[Test(Yard)]
+void a_link_that_was_changed_or_taken_back_opens_nothing() {
+  var link = PapersLink();
+  Assert.Throws<NotAuthorized>(() => AnswerLink.From(link.Substring(0, link.Length - 2) + "xx"));
+  Assert.Throws<NotAuthorized>(() => AnswerLink.From("g1.not-a-link"));
+  runas (Edvin) { RevokeAnswerLink(HumanRequest.Single()); }
+  Assert.Throws<NotAuthorized>(() => AnswerLink.From(link));
+  // A new link for the same request works again.
+  var fresh = "";
+  runas (Edvin) { fresh = AnswerLinkFor(HumanRequest.Single()); }
+  Assert.True(ViewByLink(AnswerLink.From(fresh)).MayAnswer);
+}
+
+/// The owner answers after the yard called the request off, and another answers after theirs ran out of time: each
+/// answer is kept, with who sent it, and applied to nothing.
+[Test(Yard)]
+void an_external_answer_after_cancel_or_expiry_is_kept_not_applied() {
+  TestClock.Set(MondayMorning());
+  var link = PapersLink(expireAfter: TimeSpan.FromDays(5));
+  runas (Edvin) {
+    CancelRequest(HumanRequest.Single(), "Tern has been sold; the new owner will send her papers.");
+    Workflow.Settle(HumanRequest.Single());
+  }
+  var view = ViewByLink(AnswerLink.From(link));
+  Assert.Equal(RequestStatus.Cancelled, view.Status);
+  Assert.False(view.MayAnswer);
+  var late = AnswerByLink(AnswerLink.From(link), new RequestAnswer { Values = AinosPapers() }, "Aino Saarela");
+  Assert.True(late.Kept);
+  Assert.Equal(LateWhy.Cancelled, late.Why);
+  Assert.Equal("This request was already closed. Your answer has been kept and passed on, and changes nothing by itself.", late.Said);
+  Background.Settle();
+
+  runas (Edvin) {
+    var request = HumanRequest.Single();
+    Assert.Equal(RequestStatus.Cancelled, request.Status);
+    Assert.Null(request.AnsweredAt);
+    Assert.Equal("", Tern().Registration);               // nothing was written onto the boat
+    var kept = LateAnswer.Single();
+    Assert.Equal("Aino Saarela", kept.ByName);
+    Assert.Equal(Assurance.Link, kept.With);
+    Assert.Contains("FIN-A-40821", kept.AnswerJson!);
+    Assert.Equal(1, ViewRequest(request.Id)!.LateAnswers.Count);
+    Assert.Equal(1, Heard.Count(h => h.What == "late"));
+  }
+
+  // A second request, left until it gives up.
+  var second = "";
+  runas (Edvin) {
+    var again = AskForPapers(Boat.Single(b => b.Name == "Sula"), TimeSpan.FromDays(2), TimeSpan.FromDays(5));
+    Workflow.Settle(again);
+    second = AnswerLinkFor(again);
+  }
+  TestClock.Advance(TimeSpan.FromDays(6));
+  runas (Edvin) { Workflow.Settle(HumanRequest.Single(r => r.Title == "The papers for Sula")); }
+  var expired = AnswerByLink(AnswerLink.From(second), new RequestAnswer { Values = AinosPapers() }, "Pekka Ronkainen");
+  Assert.True(expired.Kept);
+  Assert.Equal(LateWhy.Expired, expired.Why);
+  runas (Edvin) {
+    Assert.Equal(RequestStatus.Expired, HumanRequest.Single(r => r.Title == "The papers for Sula").Status);
+    Assert.Equal("", Boat.Single(b => b.Name == "Sula").Registration);
+    Assert.Equal(2, LateAnswer.Count());
+  }
+}

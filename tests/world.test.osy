@@ -1,0 +1,55 @@
+// The Kestrel yard the tests run in: two hands, the foreman, the manager, the yard's owner — and two boats whose owners
+// have no account.
+using Osysharp.Identity;
+using Osysharp.Organizations;
+using Osysharp.Organizations.ServicePlans;
+using Osysharp.WorkQueues;
+using Osysharp.HumanRequests;
+using Osysharp.Workflow;
+using Osysharp.ServiceHours;
+using Boatyard;
+
+[TestFixture]
+void Yard() {
+  var joel   = new Person { Email = "joel@kestrelyard.example",   DisplayName = "Joel Aro",      CodeHash = Security.HashPassword("1111") };
+  var signe  = new Person { Email = "signe@kestrelyard.example",  DisplayName = "Signe Holm",    CodeHash = Security.HashPassword("2222") };
+  var edvin  = new Person { Email = "edvin@kestrelyard.example",  DisplayName = "Edvin Strand",  CodeHash = Security.HashPassword("3333") };
+  var marit  = new Person { Email = "marit@kestrelyard.example",  DisplayName = "Marit Lund",    CodeHash = Security.HashPassword("4444") };
+  var henrik = new Person { Email = "henrik@kestrelyard.example", DisplayName = "Henrik Kestrel", CodeHash = Security.HashPassword("5555") };
+  new RoleGrant { Member = joel,   Role = YardRole.Hand };
+  new RoleGrant { Member = signe,  Role = YardRole.Hand };
+  new RoleGrant { Member = edvin,  Role = YardRole.Foreman };
+  new RoleGrant { Member = marit,  Role = YardRole.Manager };
+  new RoleGrant { Member = henrik, Role = YardRole.Owner };
+
+  new OrganizationTier { Name = "Standard", Rank = 1, IsDefault = true };
+
+  // The yard works weekdays, eight to four, Stockholm time.
+  var hours = new ServiceHours { Name = "Yard hours", Zone = Zone.Of("Europe/Stockholm") };
+  foreach (var d in new List<DayOfWeek> { DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday }) {
+    new ServiceWindow { ServiceHours = hours, Day = d, Start = TimeSpan.FromHours(8), End = TimeSpan.FromHours(16) };
+  }
+
+  // One queue, and everybody at the yard is in it.
+  var yard = new Queue { Name = "Yard", Position = 1 };
+  foreach (var p in new List<Person> { joel, signe, edvin, marit, henrik }) { new QueueMember { Queue = yard, Member = p }; }
+
+  var tern = new Boat { Name = "Tern", OwnerName = "Aino Saarela", OwnerEmail = "aino.saarela@example.com" };
+  new Boat { Name = "Sula", OwnerName = "Pekka Ronkainen", OwnerEmail = "pekka@example.com" };
+  new Quote { Boat = tern, Work = "Replace the keel bolts", Amount = 4800m };
+}
+
+principal Joel   => Person.Single(p => p.Email == "joel@kestrelyard.example");
+principal Signe  => Person.Single(p => p.Email == "signe@kestrelyard.example");
+principal Edvin  => Person.Single(p => p.Email == "edvin@kestrelyard.example");
+principal Marit  => Person.Single(p => p.Email == "marit@kestrelyard.example");
+principal Henrik => Person.Single(p => p.Email == "henrik@kestrelyard.example");
+
+Person PersonNamed(string first) { return Person.Single(p => p.DisplayName.StartsWith(first)); }
+Boat Tern() { return Boat.Single(b => b.Name == "Tern"); }
+Quote KeelBolts() { return Quote.Single(q => q.Work == "Replace the keel bolts"); }
+ServiceHours TheYardsHours() { return ServiceHours.Single(h => h.Name == "Yard hours"); }
+HumanRequest TheRequest(Guid id) { return HumanRequest.Single(r => r.Id == id); }
+
+/// Monday 9 March 2026, 09:00 in Stockholm (UTC+1).
+DateTime MondayMorning() { return new DateTime(2026, 3, 9, 8, 0, 0); }

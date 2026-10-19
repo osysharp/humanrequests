@@ -1,0 +1,49 @@
+// Osysharp.HumanRequests — something put to a person, and their answer coming back to whatever waits for it.
+//
+//     var request = PutRequest(new NewRequest {
+//       Kind = RequestKind.Approval, To = manager, Title = "Refund order T-1042 in full?",
+//       Context = "The parcel has been held as damaged since 6 March.",
+//       About = Subject.Of(order, "Order T-1042", version: order.Revision),
+//       Within = TimeSpan.FromHours(8), Hours = officeHours,
+//     });
+//     var answer = await Requests.Answer(request);          // in a workflow: parks, for days if it takes days
+//     if (answer.Approved) { UseApproval(request, order.Revision); Refund(order); }
+//
+// ⚑ FOUR KINDS, ONE ROW: a question with the options it may be answered with, an approval of one exact thing, a
+//   request for information (the fields of a class you declare), a request for a document. Whoever asked — a person,
+//   a process, an agent — what it is about and the version of that which was shown, the deadline, the reminders and
+//   who it goes to next are all on the request.
+//
+// ⚑ ONE INBOX. A request is an ordinary item of the app's work queues (`HumanRequest : WorkItem`): it waits in a queue,
+//   the person it is put to holds it, and it is answered on the item's own screen. Somebody with no account answers
+//   through a link that opens that one request and nothing else.
+//
+// ⚑ AN APPROVAL IS OF ONE EXACT VERSION. `UseApproval(request, versionNow)` refuses when what was approved has changed
+//   since, when it was already acted on, or when the answer was not a yes — so the act is done once, on what was shown.
+//
+// ⚑ AN ANSWER THAT COMES TOO LATE IS KEPT, NEVER APPLIED: after the request was answered, called off or ran out of
+//   time, what somebody still sends is stored beside it and changes nothing.
+//
+// ⚑ THE APP SAYS TWO THINGS, each nobody's until it does:
+//     policy AsksPeople       => IsStaff;      // puts requests to people
+//     policy OverseesRequests => IsLead;       // reads every request, calls one off, gives it more time
+package Osysharp.HumanRequests {
+  version     "1.4.0";
+  minPlatform "0.14.0";
+  summary     "requests put to people — a question with typed options, an approval bound to the exact version approved, a request for information or a document — from a person, a process or an agent, with a deadline in business hours, reminders and escalation; answered in the app's work queue or, with no account, through a link that opens that one request; the answer comes back typed to whatever waits for it, however long that takes.";
+
+  model "model/**/*.osy";
+  tests "tests";
+  // What a person is shown and what they write back are their words: an app maps the level onto its own classification.
+  personal Content;
+  // Who asked, who is asked, who answered.
+  use Osysharp.Identity@0;
+  // A request is an item of the app's work queues: one inbox, its queues, its promises.
+  use Osysharp.WorkQueues@1;
+  // The request's own run: its deadline, its reminders, and what waits for the answer.
+  use Osysharp.Workflow;
+  // Deadlines counted in the hours people work.
+  use Osysharp.ServiceHours;
+  // The request on the item's screen, and the form somebody with a link answers on.
+  use Osysharp.Ui;
+}

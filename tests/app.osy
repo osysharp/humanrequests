@@ -1,0 +1,18 @@
+// The producer's test project for Osysharp.HumanRequests — a boatyard. A boat comes in for work; the yard quotes it,
+// and a quote over the foreman's limit needs the yard manager's approval of that exact quote; the foreman is asked
+// which slip a boat goes on; the boat's owner, who has no account, is asked for the boat's papers through a link.
+// Nothing here is an agent: the requests are put by people and by the quote's own process.
+app Boatyard {
+  model "model/**/*.osy";
+  tests "**/*.test.osy";
+  use Osysharp.HumanRequests@1;
+  use Osysharp.WorkQueues@1;
+  use Osysharp.Identity@0;
+  use Osysharp.Organizations@0;
+  use Osysharp.Organizations.ServicePlans@0;
+  use Osysharp.Presence@0;
+  use Osysharp.Observability;
+  use Osysharp.Workflow;
+  use Osysharp.ServiceHours;
+  use Osysharp.Ui;
+}

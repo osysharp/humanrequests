@@ -1,0 +1,113 @@
+// Osysharp.HumanRequests — an approval is of ONE EXACT VERSION, and is used once. The quote for Tern's keel bolts is
+// revision 1 when the manager is asked; what is sent to the owner must be the revision she approved.
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+using Osysharp.HumanRequests;
+using Osysharp.Workflow;
+using Boatyard;
+
+Guid Approved() {
+  Guid id = Guid.Empty;
+  runas (Edvin) { id = AskApproval(KeelBolts(), PersonNamed("Marit")).Id; }
+  runas (Marit) { AnswerRequest(TheRequest(id), RequestAnswer.Approve("Go ahead.")); }
+  return id;
+}
+
+[Test(Yard)]
+void an_approval_says_what_it_is_of_and_which_version_was_shown() {
+  runas (Edvin) {
+    var request = AskApproval(KeelBolts(), PersonNamed("Marit"));
+    Assert.Equal(RequestKind.Approval, request.Asks);
+    Assert.Equal("Quote", request.SubjectType);
+    Assert.Equal(KeelBolts().Id, request.SubjectId);
+    Assert.Equal("Replace the keel bolts on Tern", request.SubjectLabel);
+    Assert.Equal("r1", request.SubjectVersion);
+    // What she is shown beside it, and the two answers an approval always offers.
+    var facts = JsonSerializer.Deserialize<List<RequestFact>>(request.FactsJson);
+    Assert.Equal(["Amount: 4800.00 EUR", "Revision: 1"], facts.Select(f => f.Label + ": " + f.Value).ToList());
+    var options = JsonSerializer.Deserialize<List<RequestOption>>(request.OptionsJson);
+    Assert.Equal(["approve:Approve", "reject:Reject"], options.Select(o => o.Key + ":" + o.Label).ToList());
+    // An approval of nothing in particular is refused when it is put.
+    var bare = Assert.Throws<ValidationException>(() => PutRequest(new NewRequest { Kind = RequestKind.Approval, To = PersonNamed("Marit"), Title = "OK?" }));
+    Assert.Contains("An approval is of one exact thing", bare.Message);
+  }
+}
+
+[Test(Yard)]
+void an_approval_covers_the_act_once_for_the_version_approved() {
+  var id = Approved();
+  runas (Edvin) {
+    Assert.True(ApprovalCovers(TheRequest(id), "r1"));
+    SendQuote(KeelBolts(), TheRequest(id));
+    Assert.True(KeelBolts().Sent);
+    Assert.Equal("r1", TheRequest(id).ActedVersion);
+    Assert.NotNull(TheRequest(id).ActedAt);
+    // Used: it does not cover a second send.
+    var again = Assert.Throws<ApprovalNoLongerApplies>(() => SendQuote(KeelBolts(), TheRequest(id)));
+    Assert.Equal("The approval of Replace the keel bolts on Tern has already been acted on. An approval is used once: ask again.", again.Message);
+  }
+}
+
+/// The quote is changed after the manager approved it. Her yes was to 4,800; the act — sending 6,900 to the owner —
+/// is refused, the quote is not sent, and asking again puts a new request about the quote as it is now.
+[Test(Yard)]
+void an_approval_does_not_cover_what_changed_after_it_was_given() {
+  var id = Approved();
+  runas (Edvin) {
+    Requote(KeelBolts(), 6900m);
+    Assert.False(ApprovalCovers(TheRequest(id), "r2"));
+    var refused = Assert.Throws<ApprovalNoLongerApplies>(() => SendQuote(KeelBolts(), TheRequest(id)));
+    Assert.Equal("Replace the keel bolts on Tern has changed since it was approved, so the approval no longer applies. Ask again, about it as it is now.", refused.Message);
+    Assert.False(KeelBolts().Sent);
+    Assert.Null(TheRequest(id).ActedAt);
+
+    var fresh = ReplaceRequest(TheRequest(id), new NewRequest {
+      Kind = RequestKind.Approval, To = PersonNamed("Marit"), Title = "Approve the quote for Tern?", About = QuoteAsShown(KeelBolts()),
+    }, "The quote was revised.");
+    Assert.Equal("r2", fresh.SubjectVersion);
+    Assert.Equal(id, fresh.Replaces!.Id);
+    Assert.False(ApprovalCovers(fresh, "r2"));          // not given yet
+  }
+  runas (Marit) { AnswerRequest(HumanRequest.Single(r => r.SubjectVersion == "r2"), RequestAnswer.Approve()); }
+  runas (Edvin) {
+    SendQuote(KeelBolts(), HumanRequest.Single(r => r.SubjectVersion == "r2"));
+    Assert.True(KeelBolts().Sent);
+  }
+}
+
+[Test(Yard)]
+void a_no_covers_nothing_and_carries_its_reason() {
+  Guid id = Guid.Empty;
+  runas (Edvin) { id = AskApproval(KeelBolts(), PersonNamed("Marit")).Id; }
+  runas (Marit) {
+    var bare = Assert.Throws<ValidationException>(() => AnswerRequest(TheRequest(id), new RequestAnswer { Choice = "reject" }));
+    Assert.Equal("Say why not — whoever asked needs the reason to do something about it.", bare.Message);
+    AnswerRequest(TheRequest(id), RequestAnswer.Reject("Stainless bolts will not pass survey."));
+  }
+  runas (Edvin) {
+    var outcome = OutcomeOf(TheRequest(id));
+    Assert.True(outcome.Rejected);
+    Assert.False(outcome.Approved);
+    var refused = Assert.Throws<ApprovalNoLongerApplies>(() => SendQuote(KeelBolts(), TheRequest(id)));
+    Assert.Equal("Replace the keel bolts on Tern was not approved: Stainless bolts will not pass survey.", refused.Message);
+    Assert.False(KeelBolts().Sent);
+  }
+}
+
+[Test(Yard)]
+void an_approval_that_was_called_off_or_is_not_an_approval_covers_nothing() {
+  Guid approval = Guid.Empty;
+  Guid question = Guid.Empty;
+  runas (Edvin) {
+    approval = AskApproval(KeelBolts(), PersonNamed("Marit")).Id;
+    question = AskWhichSlip(Tern(), PersonNamed("Marit")).Id;
+  }
+  runas (Edvin) { CancelRequest(TheRequest(approval), "The owner withdrew the job."); }
+  runas (Marit) { AnswerRequest(TheRequest(question), RequestAnswer.Choose("north-slip")); }
+  runas (Edvin) {
+    Assert.Equal("The approval of Replace the keel bolts on Tern was never given: the request was called off.",
+                 Assert.Throws<ApprovalNoLongerApplies>(() => UseApproval(TheRequest(approval), "r1")).Message);
+    Assert.Equal("That request is not an approval.",
+                 Assert.Throws<ApprovalNoLongerApplies>(() => UseApproval(TheRequest(question), "")).Message);
+  }
+}

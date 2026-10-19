@@ -1,0 +1,145 @@
+// The request's own run: it keeps the time while nobody is looking — reminders, the date it is late at, who it goes
+// on to, the moment it gives up — and closes the request when its answer is in.
+namespace Osysharp.HumanRequests;
+
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+using Osysharp.Workflow;
+
+/// One run per request, beside the inbox's own run for the item.
+///
+/// ⚑ LATE IS NOT CLOSED. When its date passes (`AnswerWithin`) the request is OVERDUE: it says so, it goes on to
+///   whoever was named (`EscalateTo`), and it still waits for its answer. Nothing is decided by the silence. It
+///   closes unanswered only when it was given a time to give up at (`ExpireAfter`), or is called off.
+public workflow RequestFlow {
+  Tracks       = HumanRequest.Status;
+  Autostart    = true;
+  Initial      = Open;
+  // Its time is counted in the hours the asker named.
+  ServiceHours = this.Item.AnswerHours;
+  Accrues      = [Open];
+  // How long it may wait at all.
+  Deadline { Within = this.Item.ExpireAfter; }
+
+  // The three below are raised by the kit's own functions, after they have written the row — and each arm decides
+  // from the ROW, never from the raise: an event with nothing behind it moves nothing.
+  event Resolve();
+  event CallOff();
+  event Retime(string why);
+
+  on Deadline {
+    GiveUpOnRequest(this.Item);
+    goto Expired;
+  }
+
+  on CallOff {
+    when (this.Item.CallOffAsked) { goto Cancelled; }
+    default { }
+  }
+
+  on Retime(string why) {
+    // The inbox's date for the item moves with the request's own.
+    var due = this.Item.AnswerWithin == null ? null : DueOf(this.Item);
+    if (due != null) { MoveDue(this.Item, due!.Value, why); }
+    Workflow.Retarget();
+    Raise(new HumanRequestRetimed { Request = this.Item, Why = why });
+  }
+
+  state Open {
+    subscribe Resolve() as Answer {
+      Finished {
+        Within = this.Item.AnswerWithin;
+        Remind Nudge(After = this.Item.RemindAfter, ThenEvery = this.Item.RemindEvery) { RemindOf(this.Item); }
+        // No goto: it is late, and still owed.
+        Unfinished { LateOf(this.Item); }
+      }
+    }
+    on Answer {
+      when (this.Item.AnsweredAt != null) { goto Answered; }
+      default { }
+    }
+  }
+
+  terminal success Answered {
+    enter {
+      Closed(this.Item, null);
+      Raise(new HumanRequestAnswered { Request = this.Item });
+    }
+  }
+  terminal error Expired {
+    Message = "nobody answered in the time the request could wait";
+    enter {
+      Closed(this.Item, "Ran out of time.");
+      Raise(new HumanRequestExpired { Request = this.Item });
+    }
+  }
+  terminal cancel Cancelled {
+    Message = "the request was called off";
+    enter {
+      Closed(this.Item, this.Item.ClosedWhy == "" ? "Called off." : this.Item.ClosedWhy);
+      Raise(new HumanRequestCancelled { Request = this.Item, Why = this.Item.ClosedWhy });
+    }
+  }
+}
+
+/// When a request is late: its date, counted from when it arrived in the hours it names.
+DateTime DueOf(HumanRequest request) {
+  return Osysharp.ServiceHours.ServiceHours.After(request.AnswerHours, request.ArrivedAt, request.AnswerWithin!.Value);
+}
+
+/// One reminder — until the request has had as many as it may.
+void RemindOf(HumanRequest request) {
+  if (request.Reminders >= request.MaxReminders) { return; }
+  request.Reminders = request.Reminders + 1;
+  request.LastRemindedAt = DurableClock.UtcNow;
+  Raise(new HumanRequestReminded { Request = request, Number = request.Reminders, Words = App.Setting<RequestsSetup>().Words.Reminder(request) });
+}
+
+/// It waited as long as it could: why it closed. Called by the request's own run alone.
+[Server, Authorize(HandlesRequests)]
+void GiveUpOnRequest(HumanRequest request) { request.ClosedWhy = "Nobody answered in the time it could wait."; }
+
+/// The date passed with no answer: it is late, it goes on to whoever was named, and it still waits.
+[Server, Authorize(HandlesRequests)]
+void LateOf(HumanRequest request) {
+  request.OverdueAt = DurableClock.UtcNow;
+  Principal? to = null;
+  if (request.EscalateTo != null && request.EscalatedTo == null && request.OutsideEmail == "") {
+    to = request.EscalateTo;
+    request.EscalatedTo = to;
+    // Theirs in the inbox too, when they may hold it there.
+    AddressWork(request, to!);
+  }
+  Raise(new HumanRequestOverdue { Request = request, EscalatedTo = to });
+}
+
+/// The request has closed: the inbox's item is done (or cancelled), and whatever waited for the answer goes on.
+void Closed(HumanRequest request, string? cancelledWhy) {
+  if (cancelledWhy == null) { WorkDone(request); CloseWork(request); }
+  else { CancelWork(request, cancelledWhy!); }
+  foreach (var wait in RequestWait.Where(w => w.Request == request && w.Held && w.Status == WaitStatus.Pending).Take(1).ToList()) {
+    RequestWaitFlow.RaiseRelease(wait);
+  }
+}
+
+/// What a waiting workflow's `await Requests.Answer(request)` is parked on. Started by the waiter; ended when the
+/// request closes — or at once, when it had closed before anybody waited.
+public workflow RequestWaitFlow {
+  Tracks    = RequestWait.Status;
+  Autostart = false;
+  Initial   = Pending;
+
+  event Release();
+
+  state Pending {
+    enter {
+      this.Item.Held = true;
+      if (this.Item.Request.Status != RequestStatus.Open) { goto Released; }
+    }
+    on Release {
+      when (this.Item.Request.Status != RequestStatus.Open) { goto Released; }
+      default { }
+    }
+  }
+  terminal success Released { }
+}

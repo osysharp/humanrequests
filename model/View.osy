@@ -1,0 +1,147 @@
+// What a request looks like to whoever is about to answer it — one shape for the inbox and for the link, so the two
+// screens cannot say different things about the same request.
+namespace Osysharp.HumanRequests;
+
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+
+/// An answer that came too late, as whoever asked reads it.
+public class LateLine {
+  public string Who = "";
+  public string Said = "";
+  public string Why = "";
+  public DateTime At;
+}
+
+/// ⭐ A REQUEST AS A PERSON READS IT: what is asked, by whom, about what, what waits for it, what it may be answered
+/// with, how its time stands — and, once it has one, the answer.
+public class RequestView {
+  public Guid Id;
+  public RequestKind Asks = RequestKind.Question;
+  public RequestStatus Status = RequestStatus.Open;
+  public string Title = "";
+  public string Context = "";
+  /// Who asked, in words: "Edvin Strand", "Quote approval (a process)", "Inspector (an agent), for Joel Aro".
+  public string AskedBy = "";
+  /// Who it waits for.
+  public string AskedOf = "";
+  /// What it is about, and the work that cannot go on until it is answered — "" when the asker named none.
+  public string About = "";
+  public string Waiting = "";
+  /// The record it is about, for whoever draws it (the `RequestSubject` slot) — and, for an approval, the version
+  /// of it that is shown and that a yes covers.
+  public string SubjectType = "";
+  public Guid? SubjectId;
+  public string Version = "";
+  public List<RequestFact> Facts = [];
+  public List<RequestOption> Options = [];
+  public List<RequestField> Fields = [];
+  public DateTime AskedAt;
+  /// When it is late — null: no date — and whether that has passed.
+  public DateTime? DueAt;
+  public bool Late = false;
+  /// Whether whoever is looking may answer it now; when not, why, in a sentence.
+  public bool MayAnswer = false;
+  public string WhyNot = "";
+  /// The answer: the option chosen as its label (or the fields, one per line), what was written beside it, who and when.
+  public string Answer = "";
+  /// The fields of an answer to a request for information, each with its label.
+  public List<RequestFact> AnswerLines = [];
+  public string Comment = "";
+  public string AnsweredBy = "";
+  public DateTime? AnsweredAt;
+  /// Why it closed with no answer.
+  public string ClosedWhy = "";
+  /// An approval that has been acted on.
+  public bool Used = false;
+  /// Answers that came too late — for whoever asked, and whoever oversees requests.
+  public List<LateLine> LateAnswers = [];
+}
+
+/// A request as whoever is signed in reads it. Null when it is not theirs to read.
+[Server, Authorize(IsAuthenticated)]
+public RequestView? ViewRequest(Guid id) {
+  var request = HumanRequest.Include(r => r.LateAnswers).FirstOrDefault(r => r.Id == id);
+  if (request == null) { return null; }
+  var view = ViewOf(request!);
+  var me = Security.CurrentUserId;
+  var person = Principal.Single(p => p.Id == me);
+  if (request!.Status != RequestStatus.Open) {
+    view.WhyNot = "";
+  } else if (request!.OutsideEmail != "") {
+    view.WhyNot = $"Sent to {OutsideWho(request!)}, who answers through the link they were sent.";
+  } else if (request!.AskedBy != null && request!.AskedBy!.Id == me) {
+    view.WhyNot = "You asked this. It waits for " + AskedWho(request!) + ".";
+  } else {
+    var theirs = (request!.To != null && request!.To!.Id == me) || (request!.EscalatedTo != null && request!.EscalatedTo!.Id == me)
+              || (request!.Assignee != null && request!.Assignee!.Id == me) || (request!.To == null && Security.Authorize(person, WorksInbox));
+    view.MayAnswer = theirs;
+    if (!theirs) { view.WhyNot = "It waits for " + AskedWho(request!) + "."; }
+  }
+  foreach (var late in request!.LateAnswers.OrderBy(l => l.At).ToList()) {
+    view.LateAnswers.Add(new LateLine {
+      Who = late.By != null ? NameOfPerson(late.By!) : late.ByName, At = late.At, Why = late.Why.Label,
+      Said = late.Choice != "" ? late.Choice + (late.Comment == "" ? "" : " — " + late.Comment) : late.Comment,
+    });
+  }
+  return view;
+}
+
+/// The request a link opens, as its holder reads it.
+[AllowAnonymous]
+public RequestView ViewByLink(AnswerLink link) {
+  var view = ViewOf(link.Row);
+  view.MayAnswer = link.Row.Status == RequestStatus.Open && link.Row.OutsideEmail != "";
+  // Somebody outside is told what they are asked and by whom — not who else is on it, nor what waits inside.
+  view.Waiting = "";
+  view.AskedOf = OutsideWho(link.Row);
+  return view;
+}
+
+RequestView ViewOf(HumanRequest request) {
+  var view = new RequestView {
+    Id = request.Id, Asks = request.Asks, Status = request.Status, Title = request.Title, Context = request.Context,
+    AskedBy = AskerWords(request), AskedOf = request.OutsideEmail != "" ? OutsideWho(request) : AskedWho(request),
+    About = request.SubjectLabel, Waiting = request.WaitingLabel, SubjectType = request.SubjectType, SubjectId = request.SubjectId,
+    Version = request.SubjectVersion,
+    Facts = JsonSerializer.Deserialize<List<RequestFact>>(request.FactsJson),
+    Options = JsonSerializer.Deserialize<List<RequestOption>>(request.OptionsJson),
+    Fields = JsonSerializer.Deserialize<List<RequestField>>(request.FieldsJson),
+    AskedAt = request.ArrivedAt, DueAt = request.DueAt, Late = request.OverdueAt != null && request.Status == RequestStatus.Open,
+    Comment = request.Comment, AnsweredAt = request.AnsweredAt, ClosedWhy = request.ClosedWhy, Used = request.ActedAt != null,
+    AnsweredBy = request.AnsweredBy != null ? NameOfPerson(request.AnsweredBy!) : request.AnsweredByName,
+  };
+  if (request.Status == RequestStatus.Answered) { view.Answer = AnswerWords(request, view); }
+  return view;
+}
+
+/// Who asked, as a person reads it.
+string AskerWords(HumanRequest request) {
+  var person = request.AskedByPerson;
+  if (request.AskedByKind == AskerKind.Person) { return person; }
+  var what = request.AskedByName != "" ? request.AskedByName : (request.AskedByKind == AskerKind.Agent ? "An agent" : "A process");
+  var kind = request.AskedByKind == AskerKind.Agent ? " (an agent)" : " (a process)";
+  return person == "" ? what + kind : what + kind + ", for " + person;
+}
+
+/// The answer in words: the label of the option chosen, or the fields that were filled in, one a line.
+string AnswerWords(HumanRequest request, RequestView view) {
+  if (request.Asks == RequestKind.Information) {
+    if (request.AnswerJson == null) { return ""; }
+    var values = JsonSerializer.Deserialize<Dictionary<string, Json>>(request.AnswerJson!);
+    List<string> lines = [];
+    foreach (var f in view.Fields) {
+      if (!values.ContainsKey(f.Key)) { continue; }
+      var text = values[f.Key].ToString();
+      var said = text.StartsWith("\"") ? TextOfJson(text) : text == "true" ? "Yes" : text == "false" ? "No" : text;
+      foreach (var c in f.Choices) { if (c.Key == said) { said = c.Label; } }
+      lines.Add(f.Label + ": " + said);
+      view.AnswerLines.Add(new RequestFact(f.Label, said));
+    }
+    return string.Join("\n", lines);
+  }
+  // An approval is read as what was decided, not as the button that was pressed.
+  if (request.Asks == RequestKind.Approval) { return request.Choice == "approve" ? "Approved" : "Not approved"; }
+  foreach (var o in view.Options) { if (o.Key == request.Choice) { return o.Label; } }
+  return request.Choice;
+}

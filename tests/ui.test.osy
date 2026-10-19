@@ -1,0 +1,244 @@
+// Osysharp.HumanRequests — on screen, driven as a person: an approval answered from the inbox (and refused with a
+// reason), a question, a form whose fields are a class's members, what a quote is waiting on, the page a boat's
+// owner answers on behind her link, and approving several at once. `osy test --pixels` photographs each — wide and
+// on a phone, light and dark (`Ui.Shot`).
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+using Osysharp.HumanRequests;
+using Osysharp.Workflow;
+using Boatyard;
+
+/// The sign-in's door, both ways.
+[Test(Yard)]
+void the_sign_in_admits_a_right_code_and_refuses_everything_else() {
+  Assert.NotEqual("", SignInWithCode("marit@kestrelyard.example", "4444"));
+  Assert.Equal("", SignInWithCode("marit@kestrelyard.example", "9999"));
+  Assert.Equal("", SignInWithCode("nobody@kestrelyard.example", "4444"));
+}
+
+/// ⭐ AN APPROVAL IN THE INBOX. The manager opens it from her inbox: who asks, the question, the facts, the quote as
+/// the yard draws it, when it is wanted by — and two buttons. She says no: the sheet asks why before it sends, and
+/// what came back is on the sheet for whoever asked.
+[Test(Yard)]
+void an_approval_is_answered_from_the_inbox_with_a_reason_for_a_no() {
+  TestClock.Set(MondayMorning());
+  Guid id = Guid.Empty;
+  runas (Edvin) {
+    var request = AskApproval(KeelBolts(), PersonNamed("Marit"), TimeSpan.FromHours(16), TheYardsHours());
+    Workflow.Settle(request);
+    id = request.Id;
+  }
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Marit);
+  Ui.Visit("/inbox/mine");
+  Assert.Visible("Approve the quote for Tern?", within: "Mine list");
+  Ui.Visit("/inbox/mine/i/" + id);
+  Assert.Visible("Edvin Strand asks for your approval", within: "Request");
+  Assert.Visible("Approve the quote for Tern?", within: "Item");
+  Assert.Visible("4800.00 EUR", within: "Facts");
+  Assert.Visible("Replace the keel bolts", within: "Quote");
+  Assert.Visible("Wanted by Wed 11 Mar, 08:00.", within: "Request");
+  // What her yes would cover is said before the buttons: this revision, and nothing it turns into.
+  Assert.Visible("Your approval of Replace the keel bolts on Tern covers it exactly as it is shown here (r1). If it changes before it is acted on, you are asked again.", within: "Request");
+  Assert.Clickable("Approve");
+  Assert.Clickable("Reject");
+  Assert.NoOverflow();
+  Ui.Shot("request-approval-wide-light");
+  Ui.Theme("dark");
+  Ui.Shot("request-approval-wide-dark");
+  Ui.Theme("light");
+
+  // A no needs its reason: pressing Reject opens the place to write it, and the button waits for words.
+  Ui.Click("Reject");
+  Assert.Visible("Why not?", within: "Your answer");
+  Ui.Fill("Why not?", "Quote the bronze bolts. Stainless will not pass survey.");
+  Ui.Shot("request-rejecting-wide-light");
+  Ui.Click("Reject");
+  Assert.Visible("Quote the bronze bolts. Stainless will not pass survey.", within: "Answer");
+  Assert.Visible("Marit Lund", within: "Answer");
+  Assert.Visible("Not approved", within: "Answer");
+  Assert.Hidden("Why not?");
+  runas (Edvin) {
+    Assert.True(OutcomeOf(TheRequest(id)).Rejected);
+    Assert.Equal("Quote the bronze bolts. Stainless will not pass survey.", OutcomeOf(TheRequest(id)).Comment);
+  }
+
+  // On a phone the same sheet stands under the item's head and nothing pushes the page sideways.
+  Ui.Viewport(390, 844);
+  Ui.Visit("/inbox/mine/i/" + id);
+  Assert.Visible("Not approved", within: "Answer");
+  Assert.NoOverflow();
+  Ui.Shot("request-answered-phone-light");
+}
+
+/// The asker reads the same sheet and cannot answer it: it says who it waits for. On a phone, in the dark.
+[Test(Yard)]
+void whoever_asked_sees_who_it_waits_for_and_no_buttons() {
+  Guid id = Guid.Empty;
+  runas (Edvin) {
+    var request = AskWhichSlip(Tern(), PersonNamed("Marit"));
+    Workflow.Settle(request);
+    id = request.Id;
+  }
+  Ui.Viewport(390, 844);
+  Ui.SignInAs(Edvin);
+  Ui.Visit("/inbox/open/i/" + id);
+  Assert.Visible("Edvin Strand asks", within: "Request");
+  Assert.Visible("Waiting for Marit Lund", within: "Who it waits for");
+  Assert.Visible("You asked this. It waits for Marit Lund.", within: "Who it waits for");
+  Assert.Hidden("North slip");
+  Assert.NoOverflow();
+  Ui.Theme("dark");
+  Ui.Shot("request-waiting-phone-dark");
+  Ui.Theme("light");
+
+  // Marit answers with one press.
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Marit);
+  Ui.Visit("/inbox/mine/i/" + id);
+  Assert.Clickable("North slip");
+  Assert.Clickable("Keep her afloat");
+  Ui.Shot("request-question-wide-light");
+  Ui.Click("South slip");
+  Assert.Visible("South slip", within: "Answer");
+  runas (Edvin) { Assert.Equal("south-slip", OutcomeOf(TheRequest(id)).Choice); }
+}
+
+/// ⭐ A FORM FROM A CLASS. The hand is asked for a boat's papers: one field per member of `BoatPapers`, each as its
+/// type asks. A field left empty is said by name; filled in, the answer is on the boat.
+[Test(Yard)]
+void a_request_for_information_is_a_form_of_the_class_asked_for() {
+  Guid id = Guid.Empty;
+  runas (Edvin) {
+    var request = AskAHandForPapers(Tern(), PersonNamed("Joel"));
+    Workflow.Settle(request);
+    id = request.Id;
+  }
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Joel);
+  Ui.Visit("/inbox/mine/i/" + id);
+  Assert.Visible("Edvin Strand asks you for details", within: "Request");
+  Assert.Visible("The registration number painted on the hull.", within: "Your answer");
+  Ui.Fill("Registration", "FIN-A-40821");
+  Ui.Click("Send");
+  Assert.Visible("“Length metres” is needed.", within: "Your answer");
+  Ui.Fill("Length metres", "9.4");
+  Ui.Check("Insured");
+  Ui.Fill("Notes (if any)", "The mast step is soft.");
+  Ui.Shot("request-form-wide-light");
+  Ui.Click("Send");
+  Assert.Visible("FIN-A-40821", within: "Answer");
+  Assert.Visible("Length metres", within: "Answer");
+  runas (Edvin) {
+    Assert.Equal("FIN-A-40821", Tern().Registration);
+    Assert.Equal(9.4m, Tern().LengthMetres);
+    Assert.True(Tern().Insured);
+  }
+}
+
+/// ⭐ WHO IS BEING WAITED ON. A quote's page lists the open requests its process is held up by — what is asked, of
+/// whom, since when, and that it is late once its date has passed. When nothing is waited on, it says so.
+[Test(Yard)]
+void a_quotes_page_says_who_its_process_is_waiting_on() {
+  TestClock.Set(MondayMorning());
+  Guid quote = Guid.Empty;
+  runas (Edvin) { quote = KeelBolts().Id; }
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Henrik);
+  Ui.Visit("/quotes/" + quote);
+  Assert.Visible("Nobody is being waited on.", within: "Waiting on people");
+  Ui.Shot("waiting-empty-wide-light");
+
+  runas (Edvin) {
+    var q = KeelBolts();
+    Workflow.Run(q);
+    Workflow.Settle(q);
+  }
+  TestClock.Advance(TimeSpan.FromDays(4));
+  runas (Henrik) { Workflow.Settle(HumanRequest.Single()); }
+  Ui.Visit("/quotes/" + quote);
+  Assert.Visible("Approve the quote for Tern?", within: "Waiting on people");
+  Assert.Visible("Asked of Marit Lund, since Mon 9 Mar, 08:00, was wanted by Wed 11 Mar, 08:00.", within: "Waiting on people");
+  Assert.Visible("Late", within: "Waiting on people");
+  Assert.NoOverflow();
+  Ui.Shot("waiting-late-wide-light");
+  Ui.Viewport(390, 844);
+  Ui.Visit("/quotes/" + quote);
+  Assert.Visible("Late", within: "Waiting on people");
+  Assert.NoOverflow();
+  Ui.Theme("dark");
+  Ui.Shot("waiting-late-phone-dark");
+  Ui.Theme("light");
+}
+
+/// ⭐ SOMEBODY WITH NO ACCOUNT. The boat's owner opens the link from her mail: one request, a form, her name. She
+/// sends it; the page says it was passed on; the yard has her answer, recorded as given by the holder of the link.
+/// Opened again afterwards, the same link shows what was answered.
+[Test(Yard)]
+void somebody_with_no_account_answers_on_the_page_behind_their_link() {
+  var link = "";
+  runas (Edvin) {
+    var request = AskForPapers(Tern(), TimeSpan.FromDays(2));
+    Workflow.Settle(request);
+    link = AnswerLinkFor(request);
+  }
+  Ui.Viewport(390, 844);
+  Ui.Visit("/answer/" + link);
+  Assert.Visible("Edvin Strand asks you for details", within: "Answer");
+  Assert.Visible("The papers for Tern", within: "Answer");
+  Assert.Visible("Before we lift her we need her registration", within: "Answer");
+  Assert.NoOverflow();
+  Ui.Shot("external-form-phone-light");
+  Ui.Fill("Your name", "Aino Saarela");
+  Ui.Fill("Registration", "FIN-A-40821");
+  Ui.Fill("Length metres", "9.4");
+  Ui.Check("Insured");
+  Ui.Click("Send");
+  Assert.Visible("Thank you. Your answer has been passed on.", within: "Received");
+  Ui.Shot("external-sent-phone-light");
+
+  runas (Edvin) {
+    var outcome = OutcomeOf(HumanRequest.Single());
+    Assert.True(outcome.Answered);
+    Assert.Equal("Aino Saarela", outcome.ByName);
+    Assert.Equal(Assurance.Link, outcome.With);
+    Assert.Equal("FIN-A-40821", Tern().Registration);
+  }
+
+  Ui.Viewport(1440, 900);
+  Ui.Visit("/answer/" + link);
+  Assert.Visible("FIN-A-40821", within: "Answer");
+  Assert.Hidden("Send");
+  Ui.Theme("dark");
+  Ui.Shot("external-answered-wide-dark");
+  Ui.Theme("light");
+}
+
+/// ⭐ MANY AT ONCE. With approvals picked in the inbox, the bulk bar offers "Approve all" — each approved as the
+/// person's own answer, so one that is not hers stays exactly as it was, and the bar says how many.
+[Test(Yard)]
+void approving_several_at_once_approves_only_what_is_the_persons_to_approve() {
+  runas (Edvin) {
+    Workflow.Settle(AskApproval(KeelBolts(), PersonNamed("Marit")));
+    var other = new Quote { Boat = Boat.Single(b => b.Name == "Sula"), Work = "Antifoul the hull", Amount = 2100m };
+    Workflow.Settle(AskApproval(other, PersonNamed("Marit")));
+    var third = new Quote { Boat = new Boat { Name = "Lom", OwnerName = "Ritva Lehto", OwnerEmail = "ritva@example.com" }, Work = "Service the winches", Amount = 900m };
+    Workflow.Settle(AskApproval(third, PersonNamed("Henrik")));
+  }
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Henrik);                                   // he oversees requests, so he reads all three; one is his
+  Ui.Visit("/inbox/open");
+  Ui.Click("Select Approve the quote for Tern?");
+  Ui.Click("Select Approve the quote for Sula?");
+  Ui.Click("Select Approve the quote for Lom?");
+  Assert.Visible("3 selected", within: "Selected");
+  Assert.Clickable("Approve all");
+  Ui.Shot("request-bulk-wide-light");
+  Ui.Click("Approve all");
+  Assert.Visible("Approved 1 of 3. The rest are not yours to approve, or are no longer open.");
+  runas (Henrik) {
+    Assert.Equal(1, HumanRequest.Count(r => r.Status == RequestStatus.Answered));
+    Assert.Equal("Henrik Kestrel", HumanRequest.Single(r => r.Status == RequestStatus.Answered).AnsweredBy!.DisplayName);
+    Assert.Equal(2, HumanRequest.Count(r => r.Status == RequestStatus.Open));
+  }
+}

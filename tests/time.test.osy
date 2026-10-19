@@ -1,0 +1,171 @@
+// Osysharp.HumanRequests — time: a date counted in the hours people work, reminders up to a limit, late is not
+// closed, who a late request goes on to, more time, and the moment a request gives up.
+//
+// The yard works weekdays 08:00–16:00 Stockholm time. Monday 9 March 2026, 09:00 there, is 08:00 UTC.
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+using Osysharp.HumanRequests;
+using Osysharp.Workflow;
+using Boatyard;
+
+/// A request with everything about its time said: sixteen working hours, a reminder after four and every four
+/// after that, three at most, and Henrik next.
+HumanRequest AskMarit(TimeSpan? expireAfter = null) {
+  return PutRequest(new NewRequest {
+    Kind = RequestKind.Approval, To = PersonNamed("Marit"), Title = "Approve the quote for Tern?",
+    About = QuoteAsShown(KeelBolts()), Within = TimeSpan.FromHours(16), Hours = TheYardsHours(), ExpireAfter = expireAfter,
+    RemindAfter = TimeSpan.FromHours(4), RemindEvery = TimeSpan.FromHours(4), MaxReminders = 2, EscalateTo = PersonNamed("Henrik"),
+  });
+}
+
+/// Move the clock on and let the request's run see it, as its asker.
+void After(TimeSpan time, Guid id) {
+  TestClock.Advance(time);
+  runas (Edvin) { Workflow.Settle(TheRequest(id)); }
+}
+
+[Test(Yard)]
+void business_hours_and_zones_compute_the_due_time() {
+  TestClock.Set(MondayMorning());
+  runas (Edvin) {
+    var request = AskMarit();
+    Workflow.Settle(request);
+    // Sixteen working hours from Monday 09:00: seven on Monday, eight on Tuesday, one on Wednesday — 09:00 Wednesday
+    // in Stockholm, 08:00 UTC. The inbox shows the same date the request's own run counts to.
+    Assert.Equal(new DateTime(2026, 3, 11, 8, 0, 0), request.DueAt);
+    Assert.Equal("Marit Lund", request.Assignee!.DisplayName);
+  }
+}
+
+[Test(Yard)]
+void reminders_are_counted_in_working_hours_and_stop_at_their_limit() {
+  TestClock.Set(MondayMorning());
+  Guid id = Guid.Empty;
+  runas (Edvin) { var r = AskMarit(); Workflow.Settle(r); id = r.Id; }
+
+  After(TimeSpan.FromHours(3), id);                      // Monday 12:00 — three working hours
+  runas (Edvin) { Assert.Equal(0, TheRequest(id).Reminders); }
+  After(TimeSpan.FromHours(1), id);                      // Monday 13:00 — four
+  runas (Edvin) {
+    Assert.Equal(1, TheRequest(id).Reminders);
+    Assert.Equal(1, Heard.Count(h => h.What == "reminded" && h.About == "1: Still waiting for your answer, due 11 Mar 08:00 UTC: Approve the quote for Tern?"));
+  }
+  After(TimeSpan.FromHours(14), id);                     // Tuesday 03:00 — the night is not working time
+  runas (Edvin) { Assert.Equal(1, TheRequest(id).Reminders); }
+  After(TimeSpan.FromHours(7), id);                      // Tuesday 10:00 — eight working hours
+  runas (Edvin) { Assert.Equal(2, TheRequest(id).Reminders); }
+  After(TimeSpan.FromHours(4), id);                      // Tuesday 14:00 — twelve: a third would be due, and two is the most
+  runas (Edvin) {
+    Assert.Equal(2, TheRequest(id).Reminders);
+    Assert.Equal(2, Heard.Count(h => h.What == "reminded"));
+    Assert.Equal(RequestStatus.Open, TheRequest(id).Status);
+  }
+}
+
+/// Late is not closed, and silence decides nothing: past its date the request is overdue, it goes on to the person
+/// named, and it still waits — an approval nobody gave is not an approval.
+[Test(Yard)]
+void a_breach_never_waives_an_approval() {
+  TestClock.Set(MondayMorning());
+  Guid id = Guid.Empty;
+  runas (Edvin) { var r = AskMarit(); Workflow.Settle(r); id = r.Id; }
+  After(TimeSpan.FromDays(3), id);                       // Thursday: past Wednesday 09:00
+
+  runas (Edvin) {
+    var request = TheRequest(id);
+    Assert.Equal(RequestStatus.Open, request.Status);
+    Assert.NotNull(request.OverdueAt);
+    Assert.Equal("Henrik Kestrel", request.EscalatedTo!.DisplayName);
+    Assert.Equal(1, Heard.Count(h => h.What == "overdue" && h.About == "Approve the quote for Tern? → Henrik Kestrel"));
+    // Nothing was approved by the date passing: the quote cannot be sent on it.
+    Assert.False(ApprovalCovers(request, "r1"));
+    var refused = Assert.Throws<ApprovalNoLongerApplies>(() => SendQuote(KeelBolts(), request));
+    Assert.Equal("The approval of Replace the keel bolts on Tern has not been given yet.", refused.Message);
+    Assert.False(KeelBolts().Sent);
+    // The inbox says it is late, and it is Henrik's now.
+    Assert.Equal(SlaState.Breached, request.Sla);
+    Assert.Equal("Henrik Kestrel", request.Assignee!.DisplayName);
+  }
+  // The person it went on to answers it, and that is an approval.
+  runas (Henrik) {
+    Assert.True(AnswerRequest(TheRequest(id), RequestAnswer.Approve()).Applied);
+  }
+  runas (Edvin) {
+    SendQuote(KeelBolts(), TheRequest(id));
+    Assert.True(KeelBolts().Sent);
+  }
+}
+
+[Test(Yard)]
+void an_extension_moves_every_timer_and_is_recorded() {
+  TestClock.Set(MondayMorning());
+  Guid id = Guid.Empty;
+  runas (Edvin) { var r = AskMarit(); Workflow.Settle(r); id = r.Id; }
+  After(TimeSpan.FromHours(2), id);
+  // The person asked cannot give herself more time; whoever asked can, saying why.
+  runas (Marit) {
+    var refused = Assert.Throws<RequestRefused>(() => ExtendRequest(TheRequest(id), TimeSpan.FromHours(40), "I am at the boat show."));
+    Assert.Equal("Only whoever asked, or whoever oversees requests, may change its time.", refused.Message);
+  }
+  runas (Edvin) {
+    Assert.Throws<ValidationException>(() => ExtendRequest(TheRequest(id), TimeSpan.FromHours(40), " "));
+    ExtendRequest(TheRequest(id), TimeSpan.FromHours(40), "Marit is at the boat show until Friday.");
+    Workflow.Settle(TheRequest(id));
+    // Forty working hours from Monday 09:00 is the next Monday, 09:00.
+    Assert.Equal(new DateTime(2026, 3, 16, 8, 0, 0), TheRequest(id).DueAt);
+    Assert.Equal(1, Heard.Count(h => h.What == "retimed" && h.About == "Marit is at the boat show until Friday."));
+  }
+  After(TimeSpan.FromDays(3), id);                       // Thursday: late under the old date, on time under the new
+  runas (Edvin) {
+    Assert.Null(TheRequest(id).OverdueAt);
+    Assert.Null(TheRequest(id).EscalatedTo);
+    Assert.Equal(0, Heard.Count(h => h.What == "overdue"));
+  }
+  After(TimeSpan.FromDays(5), id);                       // the Tuesday after: late now
+  runas (Edvin) { Assert.NotNull(TheRequest(id).OverdueAt); }
+}
+
+[Test(Yard)]
+void a_request_that_may_wait_only_so_long_gives_up_and_says_so() {
+  TestClock.Set(MondayMorning());
+  Guid id = Guid.Empty;
+  runas (Edvin) { var r = AskMarit(expireAfter: TimeSpan.FromHours(24)); Workflow.Settle(r); id = r.Id; }
+  After(TimeSpan.FromDays(7), id);                       // far past twenty-four working hours
+  Background.Settle();
+  runas (Edvin) {
+    var request = TheRequest(id);
+    Assert.Equal(RequestStatus.Expired, request.Status);
+    Assert.Equal("Nobody answered in the time it could wait.", OutcomeOf(request).ClosedWhy);
+    Assert.Equal(1, Heard.Count(h => h.What == "expired"));
+    Assert.Equal(Handling.Cancelled, request.Handling);
+  }
+  // Marit answers after it gave up: her answer is kept, and approves nothing.
+  runas (Marit) {
+    var late = AnswerRequest(HumanRequest.Single(r => r.Id == id), RequestAnswer.Approve());
+    Assert.True(late.Kept);
+    Assert.Equal(LateWhy.Expired, late.Why);
+    Assert.Contains("already closed", late.Said);
+  }
+  runas (Edvin) {
+    Assert.Equal(RequestStatus.Expired, TheRequest(id).Status);
+    Assert.False(ApprovalCovers(TheRequest(id), "r1"));
+  }
+}
+
+/// A reminder that falls due at the same moment the answer arrives is not sent: the answer closes the request, and
+/// its timers go with it.
+[Test(Yard)]
+void a_response_racing_a_reminder_sends_no_stale_reminder() {
+  TestClock.Set(MondayMorning());
+  Guid id = Guid.Empty;
+  runas (Edvin) { var r = AskMarit(); Workflow.Settle(r); id = r.Id; }
+  TestClock.Advance(TimeSpan.FromHours(4));              // the first reminder is due now — and nothing has swept yet
+  runas (Marit) { AnswerRequest(TheRequest(id), RequestAnswer.Approve()); }
+  After(TimeSpan.FromHours(9), id);
+  runas (Edvin) {
+    Assert.Equal(RequestStatus.Answered, TheRequest(id).Status);
+    Assert.Equal(0, TheRequest(id).Reminders);
+    Assert.Equal(0, Heard.Count(h => h.What == "reminded"));
+    Assert.Equal(0, Heard.Count(h => h.What == "overdue"));
+  }
+}

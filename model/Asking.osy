@@ -1,0 +1,253 @@
+// Putting a request to somebody, waiting for the answer, calling it off, giving it more time.
+namespace Osysharp.HumanRequests;
+
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+using Osysharp.Workflow;
+
+/// ⭐ PUT A REQUEST TO SOMEBODY. It lands in their inbox — or, for somebody with no account, is ready to be sent as a
+/// link (`AnswerLinkFor`) — and its run keeps its time from here: reminders, its date, who it goes on to.
+///
+///     var request = PutRequest(new NewRequest {
+///       Kind = RequestKind.Approval, To = manager, Title = "Refund order T-1042 in full?",
+///       About = Subject.Of("Order", order.Id, "Order T-1042", version: order.Revision.ToString()),
+///       Within = TimeSpan.FromHours(8), Hours = officeHours,
+///     });
+///
+/// Who asked is read from who is signed in. A process asks as the app.
+[Server, Authorize(AsksPeople)]
+public HumanRequest PutRequest(NewRequest ask) {
+  var title = ask.Title.Trim();
+  if (title == "") { throw new ValidationException("A request says what is asked: its `Title` is the line the person reads first."); }
+  var outside = ask.OutsideEmail.Trim() != "";
+  if (outside && ask.To != null) {
+    throw new ValidationException("A request goes to one of the app's people (`To`) or to somebody outside (`OutsideEmail`), not both.");
+  }
+  var options = ask.Options;
+  var fields = ask.Fields;
+  if (ask.Kind == RequestKind.Approval) {
+    if (ask.About == null || ask.About!.Version.Trim() == "") {
+      throw new ValidationException("An approval is of one exact thing: say what (`About`) and the version of it that is shown — "
+        + "`About = Subject.Of(\"Order\", order.Id, \"Order T-1042\", version: order.Revision.ToString())`.");
+    }
+    var words = App.Setting<RequestsSetup>().Words;
+    options = [
+      new RequestOption { Key = ApproveKey(), Label = words.Approve() },
+      new RequestOption { Key = RejectKey(), Label = words.Reject(), Grave = true, NeedsComment = true },
+    ];
+    fields = [];
+  } else if (ask.Kind == RequestKind.Information) {
+    if (fields.Count == 0) {
+      throw new ValidationException("A request for information says which: `NewRequest.For<Details>()` asks for the members of a class, or list `Fields`.");
+    }
+    options = [];
+  } else {
+    fields = [];
+    foreach (var o in options) {
+      if (o.Key.Trim() == "" || o.Label.Trim() == "") { throw new ValidationException("An option has a `Key` — what the answer carries — and a `Label` the person reads."); }
+    }
+  }
+
+  var setup = App.Setting<RequestsSetup>();
+  var me = Security.CurrentUserId;
+  var asker = me == null ? null : Principal.FirstOrDefault(p => p.Id == me);
+  var within = ask.Within ?? setup.Within;
+  var now = RequestClock();
+  var queueName = ask.Queue != "" ? ask.Queue : setup.Queue;
+  // Put from a workflow's body, it is a step of that run: the request says which.
+  var inRun = Workflow.Current;
+  var request = new HumanRequest {
+    Run = inRun?.Id, RunWorkflow = inRun == null ? "" : inRun.Workflow, RunState = inRun == null ? "" : inRun.State,
+    RunItem = inRun?.Item, RunStarter = inRun?.Starter,
+    Title = Clip(title, 200), Kind = RequestKindKey(ask.Kind), Asks = ask.Kind, Priority = ask.Priority,
+    Requester = asker, Addressee = ask.To,
+    AskedBy = asker, AskedByName = Clip(ask.AskedByName.Trim(), 200), AskedByPerson = asker == null ? "" : Clip(NameOfPerson(asker!), 200),
+    AskedByKind = ask.AskedByAgent ? AskerKind.Agent : (me == null || ask.AskedByName.Trim() != "") ? AskerKind.Process : AskerKind.Person,
+    To = ask.To, NotBy = ask.NotBy, OutsideName = Clip(ask.OutsideName.Trim(), 200), OutsideEmail = Clip(ask.OutsideEmail.Trim().ToLower(), 200),
+    Context = Clip(ask.Context.Trim(), 8000), FactsJson = JsonSerializer.Serialize(ask.Facts),
+    OptionsJson = JsonSerializer.Serialize(options), FieldsJson = JsonSerializer.Serialize(fields), AnswerType = ask.AnswerType,
+    AnswerHours = ask.Hours, AnswerWithin = within, ExpireAfter = ask.ExpireAfter,
+    RemindAfter = ask.RemindAfter ?? setup.RemindAfter, RemindEvery = ask.RemindEvery ?? setup.RemindEvery,
+    MaxReminders = ask.MaxReminders ?? setup.MaxReminders, EscalateTo = ask.EscalateTo, Replaces = ask.Replaces,
+  };
+  if (ask.About != null) {
+    request.SubjectType = ask.About!.Type;
+    request.SubjectId = ask.About!.Id;
+    request.SubjectLabel = Clip(ask.About!.Label, 300);
+    request.SubjectVersion = Clip(ask.About!.Version.Trim(), 200);
+  }
+  if (ask.WaitingWork != null) {
+    request.WaitingType = ask.WaitingWork!.Type;
+    request.WaitingId = ask.WaitingWork!.Id;
+    request.WaitingLabel = Clip(ask.WaitingWork!.Label, 300);
+  }
+  if (queueName != "") {
+    var queue = QueueNamed(queueName);
+    if (queue == null) { throw new ValidationException($"There is no work queue called “{queueName}”. An inbox admin makes one, or leave `Queue` out for the default."); }
+    request.Queue = queue;
+  }
+  // The date the inbox shows and keeps: the same instant the request's own run counts to.
+  if (within != null) { request.DueAt = Osysharp.ServiceHours.ServiceHours.After(ask.Hours, now, within!.Value); }
+  new RequestWait { Request = request };
+  Raise(new HumanRequestPut { Request = request });
+  return request;
+}
+
+/// What an approval's two answers carry.
+public string ApproveKey() { return "approve"; }
+public string RejectKey() { return "reject"; }
+
+/// ⭐ WHAT CAME BACK — what `Requests.Answer` answers, and `OutcomeOf` reads at any time.
+public class RequestOutcome {
+  public Guid Request;
+  public RequestStatus Status = RequestStatus.Open;
+  /// The option chosen, by its key. An approval: "approve" or "reject".
+  public string Choice = "";
+  /// What they wrote beside it.
+  public string Comment = "";
+  /// The fields filled in, as JSON.
+  public string AnswerJson = "";
+  /// Who answered — one of the app's people, or the name somebody outside gave — how they were known, and when.
+  public Guid? By;
+  public string ByName = "";
+  public Assurance? With;
+  public DateTime? At;
+  /// Why it closed with no answer.
+  public string ClosedWhy = "";
+
+  public bool Answered => Status == RequestStatus.Answered;
+  /// An approval that was given.
+  public bool Approved => Status == RequestStatus.Answered && Choice == "approve";
+  /// An approval that was refused: `Comment` says why.
+  public bool Rejected => Status == RequestStatus.Answered && Choice == "reject";
+
+  /// The fields of a request for information, as the class they were asked for.
+  public T As<T>() { return JsonSerializer.Deserialize<T>(AnswerJson); }
+}
+
+/// What a request has come to, read now.
+public RequestOutcome OutcomeOf(HumanRequest request) {
+  return new RequestOutcome {
+    Request = request.Id, Status = request.Status, Choice = request.Choice, Comment = request.Comment,
+    AnswerJson = request.AnswerJson ?? "", By = request.AnsweredBy == null ? null : request.AnsweredBy!.Id,
+    ByName = request.AnsweredBy != null ? NameOfPerson(request.AnsweredBy!) : request.AnsweredByName,
+    With = request.AnsweredWith, At = request.AnsweredAt, ClosedWhy = request.ClosedWhy,
+  };
+}
+
+string NameOfPerson(Principal p) { return p.DisplayName != "" ? p.DisplayName : p.Email; }
+
+/// Waiting for answers.
+public class Requests {
+  /// ⭐ WAIT FOR A REQUEST'S ANSWER — in a workflow's body, or in anything it calls. The run parks here, for as long
+  /// as the answer takes, and goes on with what came back: the answer, or that the request ran out of time or was
+  /// called off (`outcome.Status`). Nothing is asked of anybody while it waits.
+  ///
+  ///     var request = Workflow.Once("ask-manager", () => PutRequest(new NewRequest { … }));
+  ///     var answer = await Requests.Answer(request);
+  ///     if (answer.Approved) { … }
+  ///
+  /// A caller that cannot wait — a page's action, a plain function — hears `HumanRequestAnswered` instead.
+  public static async Task<RequestOutcome> Answer(HumanRequest request) {
+    if (!Workflow.InRun) {
+      throw new RequestRefused("`Requests.Answer` waits, and only a workflow can wait. From a page or a plain function, put the request and "
+        + "hear its answer: `[On] void Go(HumanRequestAnswered e) { … }` — or read `OutcomeOf(request)` when you look again.");
+    }
+    var id = request.Id;
+    var wait = RequestWait.Single(w => w.Request.Id == id);
+    await Workflow.Run("answer", wait);
+    return OutcomeOf(HumanRequest.Single(r => r.Id == id));
+  }
+
+  /// The requests waiting for whoever is signed in to answer them — put to them, gone on to them, or held by them.
+  public static List<HumanRequest> Mine() {
+    var me = Security.CurrentUserId;
+    if (me == null) { return []; }
+    return HumanRequest.Where(r => r.Status == RequestStatus.Open && (r.To.Id == me || r.EscalatedTo.Id == me || r.Assignee.Id == me))
+      .OrderBy(r => r.DueAt).Take(200).ToList();
+  }
+
+  /// The open requests that hold up one piece of work — a process, a piece of an agent's work, a case.
+  public static List<HumanRequest> WaitedOnBy(string waitingType, Guid waitingId) {
+    return HumanRequest.Where(r => r.Status == RequestStatus.Open && r.WaitingType == waitingType && r.WaitingId == waitingId)
+      .OrderBy(r => r.ArrivedAt).Take(200).ToList();
+  }
+
+  /// Every open request an agent or a process of this name has put — "what Inspector is waiting on people for".
+  public static List<HumanRequest> PutBy(string askedByName) {
+    return HumanRequest.Where(r => r.Status == RequestStatus.Open && r.AskedByName == askedByName).OrderBy(r => r.ArrivedAt).Take(200).ToList();
+  }
+}
+
+/// The text of the link for a request sent to somebody outside — what the app puts in the mail it sends them:
+/// `$"{App.BaseUrl}/answer/{AnswerLinkFor(request)}"`. For whoever asked, and whoever oversees requests.
+[Server, Authorize(HandlesRequests)]
+public string AnswerLinkFor(HumanRequest request) {
+  if (request.OutsideEmail == "") {
+    throw new RequestRefused("This request is put to somebody inside the app, who answers it in their inbox. A link is for a request with an `OutsideEmail`.");
+  }
+  RequireAskerOrOverseer(request, "send its link");
+  return $"{AnswerLink.For(request)}";
+}
+
+/// Take back every link ever made for a request: none of them opens it any more.
+[Server, Authorize(HandlesRequests)]
+public void RevokeAnswerLink(HumanRequest request) {
+  RequireAskerOrOverseer(request, "take its link back");
+  AnswerLink.RevokeAll(request);
+}
+
+/// ⭐ CALL A REQUEST OFF. Whatever waited for it goes on, told it was called off; an answer that still arrives is
+/// kept and changes nothing. For whoever asked, and whoever oversees requests.
+[Server, Authorize(HandlesRequests)]
+public void CancelRequest(HumanRequest request, string why) {
+  if (request.Status != RequestStatus.Open) { return; }
+  RequireAskerOrOverseer(request, "call it off");
+  if (why.Trim() == "") { throw new ValidationException("Say why it is called off: the person asked may read it."); }
+  request.CallOffAsked = true;
+  request.ClosedWhy = Clip(why.Trim(), 600);
+  UnitOfWork.Commit();
+  RequestFlow.RaiseCallOff(request);
+}
+
+/// ⭐ GIVE A REQUEST MORE TIME (or less): how long it may now wait from when it was put before it is late, and — when
+/// given — how long it may wait at all. Recorded with who did it and why; its reminders and its date move with it.
+[Server, Authorize(HandlesRequests)]
+public void ExtendRequest(HumanRequest request, TimeSpan within, string why, TimeSpan? expireAfter = null) {
+  if (request.Status != RequestStatus.Open) { throw new RequestRefused("This request is closed: there is nothing left to give time to."); }
+  RequireAskerOrOverseer(request, "change its time");
+  if (why.Trim() == "") { throw new ValidationException("Say why its time changes: it is kept with the request."); }
+  request.AnswerWithin = within;
+  if (expireAfter != null) { request.ExpireAfter = expireAfter; }
+  // It is on time again until the new date passes.
+  request.OverdueAt = null;
+  UnitOfWork.Commit();
+  RequestFlow.RaiseRetime(request, Clip(why.Trim(), 600));
+}
+
+/// ⭐ ASK AGAIN, ABOUT THE THING AS IT IS NOW. What was shown has changed, so the request that is open (or the
+/// approval that was given) no longer says anything about it: it is called off, and the same request is put with the
+/// new version. Answers the new request.
+[Server, Authorize(AsksPeople)]
+public HumanRequest ReplaceRequest(HumanRequest old, NewRequest ask, string why) {
+  ask.Replaces = old;
+  var fresh = PutRequest(ask);
+  if (old.Status == RequestStatus.Open) { CancelRequest(old, why.Trim() == "" ? "It was asked again about the thing as it is now." : why); }
+  return fresh;
+}
+
+/// Whoever is calling asked for `request`, or oversees requests — or is the app itself.
+void RequireAskerOrOverseer(HumanRequest request, string what) {
+  var me = Security.CurrentUserId;
+  if (me == null) { return; }
+  if (request.AskedBy != null && request.AskedBy!.Id == me) { return; }
+  var person = Principal.Single(p => p.Id == me);
+  if (Security.Authorize(person, OverseesRequests)) { return; }
+  throw new RequestRefused($"Only whoever asked, or whoever oversees requests, may {what}.");
+}
+
+string Clip(string text, int max) { return text.Length <= max ? text : text.Substring(0, max); }
+
+/// The time now: the run's own instant inside a workflow — so a step that is run again reads the same one — and the
+/// clock's everywhere else.
+DateTime RequestClock() { return Workflow.InRun ? DurableClock.UtcNow : DateTime.UtcNow; }

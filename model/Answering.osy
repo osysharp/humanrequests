@@ -1,0 +1,260 @@
+// Answering a request — in the app, or through a link — and acting on an approval once, for the version approved.
+namespace Osysharp.HumanRequests;
+
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+
+/// ⭐ WHAT SOMEBODY ANSWERS WITH.
+///
+///     AnswerRequest(request, new RequestAnswer { Choice = "refund-in-full" });
+///     AnswerRequest(request, RequestAnswer.Reject("The parcel may still turn up — wait until Monday."));
+///     AnswerRequest(request, RequestAnswer.Of(new SupplierDetails { VatNumber = "SE556677889901", Employees = 40 }));
+public class RequestAnswer {
+  /// The option chosen, by its key.
+  public string Choice = "";
+  /// What they write beside it — required where the option says so (a no to an approval always says why).
+  public string Comment = "";
+  /// The fields of a request for information, by field key, each as the text typed.
+  public Dictionary<string, string> Values = new Dictionary<string, string>();
+
+  public static RequestAnswer Approve(string comment = "") { return new RequestAnswer { Choice = "approve", Comment = comment }; }
+  public static RequestAnswer Reject(string why) { return new RequestAnswer { Choice = "reject", Comment = why }; }
+  public static RequestAnswer Choose(string key, string comment = "") { return new RequestAnswer { Choice = key, Comment = comment }; }
+  /// In words, to a question that offers no options.
+  public static RequestAnswer Say(string words) { return new RequestAnswer { Comment = words }; }
+  /// The fields of a request for information, from the class they were asked for.
+  public static RequestAnswer Of<T>(T details) {
+    var answer = new RequestAnswer();
+    var values = JsonSerializer.Deserialize<Dictionary<string, Json>>(JsonSerializer.Serialize(details));
+    foreach (var key in values.Keys) {
+      var text = values[key].ToString();
+      answer.Values[key] = text.StartsWith("\"") ? TextOfJson(text) : text == "null" ? "" : text;
+    }
+    return answer;
+  }
+}
+
+/// An answer as a PAGE holds it while it is being given, and sends it: the fields as two lists side by side — a key
+/// and what was typed for it. `SendAnswer` / `SendAnswerByLink` take one; code answers with a `RequestAnswer`.
+public class AnswerDraft {
+  public string Choice = "";
+  public string Comment = "";
+  public List<string> Keys = [];
+  public List<string> Values = [];
+
+  public RequestAnswer ToAnswer() {
+    var answer = new RequestAnswer { Choice = Choice, Comment = Comment };
+    for (var i = 0; i < Keys.Count && i < Values.Count; i++) { answer.Values[Keys[i]] = Values[i]; }
+    return answer;
+  }
+}
+
+/// What a page calls to answer a request as whoever is signed in — `AnswerRequest`, by the request's id.
+[Server, Authorize(IsAuthenticated)]
+public AnswerResult SendAnswer(Guid request, AnswerDraft draft) {
+  var row = HumanRequest.FirstOrDefault(r => r.Id == request);
+  if (row == null) { throw new RequestRefused("This request is not yours to see."); }
+  return AnswerRequest(row!, draft.ToAnswer());
+}
+
+/// What the page behind a link calls — `AnswerByLink`, from a draft.
+[AllowAnonymous]
+public AnswerResult SendAnswerByLink(AnswerLink link, AnswerDraft draft, string name = "") {
+  return RecordAnswer(link.Row, draft.ToAnswer(), null, name, Assurance.Link);
+}
+
+/// What became of an answer somebody gave.
+public class AnswerResult {
+  /// It was taken: the request is answered, and whatever waited for it goes on.
+  public bool Applied = false;
+  /// It came too late and was kept beside the request, changing nothing — `Why` says what had happened first.
+  public bool Kept = false;
+  public LateWhy? Why;
+  /// What to tell the person who answered.
+  public string Said = "";
+}
+
+/// ⭐ ANSWER A REQUEST, as whoever is signed in — the person it was put to, the person it went on to, whoever holds
+/// it, or anybody who works its queue when it names nobody. Never the person who asked.
+///
+/// An answer that does not fit what was asked — an option that was not offered, a no without a reason, a required
+/// field left empty — is refused with the sentence that says which. An answer to a request that is already closed is
+/// KEPT (`result.Kept`) and changes nothing.
+[Server, Authorize(IsAuthenticated)]
+public AnswerResult AnswerRequest(HumanRequest request, RequestAnswer answer) {
+  var me = Security.CurrentUserId;
+  var person = me == null ? null : Principal.FirstOrDefault(p => p.Id == me);
+  if (person == null) { throw new RequestRefused("A request is answered by a person: nobody is signed in."); }
+  return RecordAnswer(request, answer, person, "", Assurance.SignedIn);
+}
+
+/// ⭐ ANSWER THROUGH THE LINK that was sent to somebody with no account. The link opens the one request it was made
+/// for; `name` is who they say they are, kept with the answer beside how they were known (`Assurance.Link`).
+[AllowAnonymous]
+public AnswerResult AnswerByLink(AnswerLink link, RequestAnswer answer, string name = "") {
+  return RecordAnswer(link.Row, answer, null, name, Assurance.Link);
+}
+
+/// The one place an answer is written.
+[Server, Authorize(AnswersRequests)]
+internal AnswerResult RecordAnswer(HumanRequest request, RequestAnswer answer, Principal? person, string name, Assurance with) {
+  var words = App.Setting<RequestsSetup>().Words;
+  // Who is answering.
+  if (with == Assurance.Link) {
+    if (request.OutsideEmail == "") { throw new RequestRefused("This request is answered in the app, by the person it was put to."); }
+  } else {
+    if (request.OutsideEmail != "") { throw new RequestRefused($"This request was sent to {OutsideWho(request)}, who answers it through the link they were sent."); }
+    if (request.AskedBy != null && request.AskedBy!.Id == person!.Id) {
+      throw new RequestRefused("You asked this, so it is not yours to answer. It waits for " + AskedWho(request) + ".");
+    }
+    // SECURITY-INVARIANT(requests-a-request-is-never-answered-by-who-it-names-as-not-its-answerer): a request that
+    // decides something asked for one person is not answered by that person, however they come to hold it — put to
+    // their queue, taken by them, gone on to them. Failure mode: somebody asks for a refund and approves it from the
+    // queue they work. Guarded by tests/security.test.osy `a_request_is_not_answered_by_whoever_it_says_may_not`.
+    if (request.NotBy != null && request.NotBy!.Id == person!.Id) {
+      throw new RequestRefused("This decides something that was asked for you, so it is not yours to answer. It waits for " + AskedWho(request) + ".");
+    }
+    var theirs = (request.To != null && request.To!.Id == person!.Id)
+              || (request.EscalatedTo != null && request.EscalatedTo!.Id == person!.Id)
+              || (request.Assignee != null && request.Assignee!.Id == person!.Id)
+              || (request.To == null && Security.Authorize(person!, WorksInbox));
+    if (!theirs) { throw new RequestRefused("This request is not put to you. It waits for " + AskedWho(request) + "."); }
+  }
+
+  // What they answered, checked against what was asked.
+  var choice = answer.Choice.Trim();
+  var comment = answer.Comment.Trim();
+  string? fieldsJson = null;
+  if (request.Asks == RequestKind.Information) {
+    fieldsJson = CheckedFields(JsonSerializer.Deserialize<List<RequestField>>(request.FieldsJson), answer.Values);
+    choice = "";
+  } else {
+    var options = JsonSerializer.Deserialize<List<RequestOption>>(request.OptionsJson);
+    if (options.Count == 0) {
+      if (comment == "") { throw new ValidationException("Write your answer."); }
+      choice = "";
+    } else {
+      RequestOption? chosen = null;
+      foreach (var o in options) { if (o.Key == choice) { chosen = o; } }
+      if (chosen == null) {
+        throw new ValidationException("Choose one of: " + string.Join(", ", options.Select(o => o.Label)) + ".");
+      }
+      if (chosen!.NeedsComment && comment == "") {
+        throw new ValidationException(request.Asks == RequestKind.Approval ? "Say why not — whoever asked needs the reason to do something about it."
+                                                                           : $"“{chosen!.Label}” needs a word of explanation.");
+      }
+    }
+  }
+  if (comment.Length > 4000) { throw new ValidationException("That is longer than an answer may be (4,000 characters)."); }
+
+  // Too late: kept, never applied.
+  if (request.Status != RequestStatus.Open || request.AnsweredAt != null) {
+    var why = request.Status == RequestStatus.Cancelled ? LateWhy.Cancelled : request.Status == RequestStatus.Expired ? LateWhy.Expired : LateWhy.AlreadyAnswered;
+    var late = new LateAnswer {
+      Request = request, Why = why, Choice = choice, AnswerJson = fieldsJson, Comment = comment, By = person,
+      ByName = Clip(name.Trim(), 200), With = with, At = RequestClock(),
+    };
+    Raise(new HumanRequestAnsweredLate { Late = late });
+    UnitOfWork.Commit();
+    return new AnswerResult { Kept = true, Why = why, Said = words.TooLate() };
+  }
+
+  request.Choice = choice;
+  request.AnswerJson = fieldsJson;
+  request.Comment = comment;
+  // A link lets its holder write the answer and nothing about who they are inside the app: they are nobody there.
+  if (person != null) { request.AnsweredBy = person; }
+  request.AnsweredByName = Clip(name.Trim(), 200);
+  request.AnsweredWith = with;
+  request.AnsweredAt = RequestClock();
+  UnitOfWork.Commit();
+  // The run closes it — from the row, never from the raise: an event nobody answered behind moves nothing.
+  RequestFlow.RaiseResolve(request);
+  return new AnswerResult { Applied = true, Said = words.Thanks() };
+}
+
+string AskedWho(HumanRequest request) {
+  if (request.EscalatedTo != null) { return NameOfPerson(request.EscalatedTo!); }
+  if (request.To != null) { return NameOfPerson(request.To!); }
+  return request.Queue != null ? "the people of " + request.Queue!.Name : "the people who work the queue";
+}
+
+string OutsideWho(HumanRequest request) { return request.OutsideName != "" ? request.OutsideName : request.OutsideEmail; }
+
+/// The fields somebody filled in, checked against the fields asked for, as JSON of the answer's class.
+string CheckedFields(List<RequestField> fields, Dictionary<string, string> values) {
+  List<string> parts = [];
+  foreach (var f in fields) {
+    var text = values.ContainsKey(f.Key) ? values[f.Key].Trim() : "";
+    if (text == "") {
+      if (f.Kind == FieldKind.YesNo) { parts.Add(JsonSerializer.Serialize(f.Key) + ":false"); continue; }
+      if (f.Required) { throw new ValidationException($"“{f.Label}” is needed."); }
+      continue;
+    }
+    var value = "";
+    if (f.Kind == FieldKind.Number) {
+      decimal n = 0;
+      if (!decimal.TryParse(text.Replace(",", "."), out n)) { throw new ValidationException($"“{f.Label}” is a number."); }
+      value = n.ToString();
+    } else if (f.Kind == FieldKind.YesNo) {
+      var yes = text.ToLower() == "true" || text.ToLower() == "yes";
+      value = yes ? "true" : "false";
+    } else if (f.Kind == FieldKind.Choice) {
+      var known = false;
+      foreach (var c in f.Choices) { if (c.Key == text) { known = true; } }
+      if (!known) { throw new ValidationException($"“{f.Label}” is one of: " + string.Join(", ", f.Choices.Select(c => c.Label)) + "."); }
+      value = JsonSerializer.Serialize(text);
+    } else if (f.Kind == FieldKind.Date) {
+      DateTime d = DateTime.UtcNow;
+      try { d = DateTime.Parse(text); }
+      catch (Exception e) { throw new ValidationException($"“{f.Label}” is a date, like 2026-03-14."); }
+      value = JsonSerializer.Serialize(d.ToString("yyyy-MM-dd"));
+    } else {
+      value = JsonSerializer.Serialize(text);
+    }
+    parts.Add(JsonSerializer.Serialize(f.Key) + ":" + value);
+  }
+  foreach (var key in values.Keys) {
+    var asked = false;
+    foreach (var f in fields) { if (f.Key == key) { asked = true; } }
+    if (!asked && values[key].Trim() != "") { throw new ValidationException($"“{key}” was not asked for."); }
+  }
+  return "{" + string.Join(",", parts) + "}";
+}
+
+// ── an approval, used ───────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Whether `request` is an approval that covers acting on `versionNow`: it was given, it has not been used, and what
+/// it approved is the version in hand.
+public bool ApprovalCovers(HumanRequest request, string versionNow) {
+  return WhyNotCovered(request, versionNow) == "";
+}
+
+/// ⭐ USE AN APPROVAL — once, for the version that was approved. Call it in the same unit of work as the act it
+/// covers, with the version of the thing as it is NOW:
+///
+///     UseApproval(request, order.Revision.ToString());      // refuses unless this is what was approved
+///     Refund(order);
+///
+/// Refused (`ApprovalNoLongerApplies`) when the answer was not a yes, when what was approved has changed since —
+/// ask again with `ReplaceRequest` — or when it has already been acted on.
+[Server, Authorize(HandlesRequests)]
+public void UseApproval(HumanRequest request, string versionNow) {
+  var why = WhyNotCovered(request, versionNow);
+  if (why != "") { throw new ApprovalNoLongerApplies(why); }
+  request.ActedAt = RequestClock();
+  request.ActedVersion = Clip(versionNow.Trim(), 200);
+}
+
+string WhyNotCovered(HumanRequest request, string versionNow) {
+  var what = request.SubjectLabel != "" ? request.SubjectLabel : "this";
+  if (request.Asks != RequestKind.Approval) { return "That request is not an approval."; }
+  if (request.Status == RequestStatus.Open) { return $"The approval of {what} has not been given yet."; }
+  if (request.Status != RequestStatus.Answered) { return $"The approval of {what} was never given: the request {(request.Status == RequestStatus.Expired ? "ran out of time" : "was called off")}."; }
+  if (request.Choice != "approve") { return $"{what} was not approved" + (request.Comment == "" ? "." : ": " + request.Comment); }
+  if (request.ActedAt != null) { return $"The approval of {what} has already been acted on. An approval is used once: ask again."; }
+  if (versionNow.Trim() != request.SubjectVersion) {
+    return $"{what} has changed since it was approved, so the approval no longer applies. Ask again, about it as it is now.";
+  }
+  return "";
+}

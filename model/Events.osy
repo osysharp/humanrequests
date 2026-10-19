@@ -1,0 +1,58 @@
+// What happens to a request, told as events. Hear one with `[On]`:
+//     [On] void MailTheLink(HumanRequestPut e) { if (e.Request.OutsideEmail != "") { Send(e.Request.OutsideEmail, AnswerLinkFor(e.Request)); } }
+namespace Osysharp.HumanRequests;
+
+using Osysharp.Identity;
+
+/// A request was put to somebody. For one sent outside, this is where the app mails its link (`AnswerLinkFor`).
+[Event("Request put")]
+public sealed class HumanRequestPut { public HumanRequest Request; }
+
+/// A request has its answer. Whatever waited for it goes on.
+[Event("Request answered")]
+public sealed class HumanRequestAnswered { public HumanRequest Request; }
+
+/// The person asked was reminded: `Number` is which reminder it was, `Words` what to tell them.
+[Event("Request reminder")]
+public sealed class HumanRequestReminded {
+  public HumanRequest Request;
+  public int Number = 0;
+  public string Words = "";
+}
+
+/// A request is late: its date passed and nobody had answered. It still waits. `EscalatedTo`: who it went on to.
+[Event("Request overdue")]
+public sealed class HumanRequestOverdue {
+  public HumanRequest Request;
+  public Principal? EscalatedTo;
+}
+
+/// A request ran out of the time it could wait at all, unanswered.
+[Event("Request expired")]
+public sealed class HumanRequestExpired { public HumanRequest Request; }
+
+/// A request was called off.
+[Event("Request called off")]
+public sealed class HumanRequestCancelled {
+  public HumanRequest Request;
+  public string Why = "";
+}
+
+/// A request was given more time, or less: its dates as they are now, and why.
+[Event("Request time changed")]
+public sealed class HumanRequestRetimed {
+  public HumanRequest Request;
+  public string Why = "";
+}
+
+/// An answer came after the request was closed. It was kept, and changed nothing.
+[Event("Late answer kept")]
+public sealed class HumanRequestAnsweredLate { public LateAnswer Late; }
+
+/// Who a request was put to and what they answered were erased, at their request. A kit that told the request
+/// elsewhere — a process run's lines — hears this and tells it again without them.
+[Event("Request erased")]
+public sealed class HumanRequestErased {
+  public HumanRequest Request;
+  public string Why = "";
+}

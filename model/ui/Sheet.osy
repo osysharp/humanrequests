@@ -1,0 +1,570 @@
+// A REQUEST ON SCREEN — in the inbox, on a page of the app's own, and behind the link sent to somebody with no account.
+// One sheet: who asks and what is waiting, the question, what is known, what answering does, the answer itself.
+namespace Osysharp.HumanRequests;
+
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+using Osysharp.Ui;
+
+/// WHAT A REQUEST IS ABOUT, DRAWN BY WHOEVER OWNS THAT KIND OF THING — the place on a request's sheet, between the
+/// question and the answer, where a kit (or the app) shows the record the request is about: the lines of a quote, the
+/// change an agent proposes, the document to sign. `subjectType` and `subjectId` are the request's own
+/// (`Subject.Of("Quote", quote.Id, …)`); a contribution draws for the type it owns and nothing for any other.
+/// In a test, open the request and assert what the contribution draws.
+/// need: show what a request is about, show the thing being approved, a detail panel on an approval
+/// `changed` is the sheet's to be told by: a contribution that acts on the request itself — answers it, say — calls
+/// it, and the sheet reads the request again.
+/// e.g. `RequestSubject(view.SubjectType, view.SubjectId, view.Id, Reload);`
+[Slot] public abstract component RequestSubject(string subjectType, Guid subjectId, Guid request, Action changed);
+
+/// ⭐ A REQUEST'S SHEET. Place it where the app shows one — `RequestSheet(id)` — and it draws the request as whoever is
+/// looking may read it: the question and everything needed to answer it for the person it is put to, with the answer
+/// a press away; where it stands and what came back for whoever asked. `onAnswered`: told once an answer was taken.
+/// `titled: false` leaves the question out, for a page whose own heading already says it (the inbox's item does).
+[Composable]
+public component RequestSheet(Guid request, Action? onAnswered = null, bool titled = true) {
+  RequestView? view = null;
+  bool loaded = false;
+  string problem = "";
+  string said = "";
+
+  action Load() {
+    try { view = ViewRequest(request); } catch (Exception ex) { problem = ex.Message; }
+    loaded = true;
+  }
+  on mount { Load(); }
+
+  action Send(AnswerDraft draft) {
+    problem = "";
+    try {
+      var result = SendAnswer(request, draft);
+      said = result.Said;
+      Load();
+      if (onAnswered != null) { onAnswered(); }
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+
+  render {
+    Stack(gap: 5, w: "100%", maxW: "720px", px: 5, py: 5, label: "Request") {
+      if (!loaded) { RequestSkeleton(); }
+      if (loaded && view == null) {
+        EmptyState("This request is not yours to see", body: "It was put to somebody else, or it no longer exists.");
+      }
+      if (view != null) {
+        RequestHead(view, titled);
+        if (view.Context != "" || view.Facts.Count > 0 || view.SubjectId != null) { RequestBody(view, changed: Load); }
+        if (view.Status == RequestStatus.Open) {
+          RequestTime(view);
+          if (view.MayAnswer) {
+            RequestCovers(view);
+            AnswerControls(view, Send, problem);
+          }
+          else { RequestWaitsFor(view); }
+        } else {
+          RequestOutcomeBlock(view, said);
+        }
+        if (view.LateAnswers.Count > 0) { RequestLateAnswers(view); }
+      }
+    }
+  }
+}
+
+/// A request in the inbox: the sheet, under the item's own head.
+[Contribution("Request")]
+component RequestItemDetail(HumanRequest item) : WorkItemDetail<HumanRequest> {
+  render { RequestSheet(item.Id, titled: false); }
+}
+
+/// The shape of a sheet while it loads: a line of who asks, the question, two facts, the buttons.
+[Composable]
+public component RequestSkeleton() {
+  render {
+    Stack(gap: 4, label: "Loading the request") {
+      Skeleton(SkeletonShape.HalfLine);
+      Skeleton(SkeletonShape.Block);
+      Stack(gap: 2) { Skeleton(); Skeleton(); Skeleton(SkeletonShape.HalfLine); }
+      Row(gap: 2) { Skeleton(SkeletonShape.Control); Skeleton(SkeletonShape.Control); }
+    }
+  }
+}
+
+/// Who asks, what is waiting on the answer — and the question, the biggest thing on the sheet.
+[Composable]
+public component RequestHead(RequestView view, bool titled = true) {
+  live var kind = view.Asks == RequestKind.Approval ? "asks for your approval" : view.Asks == RequestKind.Information ? "asks you for details" : "asks";
+  render {
+    Stack(gap: 3) {
+      Row(gap: 2, align: Align.Center, wrap: Wrapping.Wrap) {
+        Text(view.AskedBy == "" ? "You are asked" : view.AskedBy + " " + kind, fontSize: FontSize.Label, fontWeight: FontWeight.Medium, color: Colors.TextSecondary);
+        if (view.Status == RequestStatus.Open && view.Late) { Badge("Late", tone: Tone.Danger); }
+        if (view.Status == RequestStatus.Answered && view.Asks != RequestKind.Approval) { Badge("Answered", tone: Tone.Success); }
+        if (view.Status == RequestStatus.Answered && view.Asks == RequestKind.Approval && view.Answer == "Approved") { Badge("Approved", tone: Tone.Success); }
+        if (view.Status == RequestStatus.Answered && view.Asks == RequestKind.Approval && view.Answer != "Approved") { Badge("Not approved", tone: Tone.Warning); }
+        if (view.Status == RequestStatus.Cancelled) { Badge("Called off", tone: Tone.Ghost); }
+        if (view.Status == RequestStatus.Expired) { Badge("Ran out of time", tone: Tone.Warning); }
+      }
+      if (titled) { Text(view.Title, fontSize: FontSize.Title, fontWeight: FontWeight.Semibold, letterSpacing: "-0.02em", lineHeight: "1.15"); }
+      if (view.Waiting != "") {
+        Row(gap: 2, align: Align.Center) {
+          Lamp(live: view.Status == RequestStatus.Open, waiting: view.Status == RequestStatus.Open);
+          Text(view.Status == RequestStatus.Open ? "Waiting on this: " + view.Waiting : "It was for: " + view.Waiting,
+               fontSize: FontSize.Label, color: Colors.TextMuted);
+        }
+      }
+    }
+  }
+}
+
+/// What is known: the context in a reading width, the facts as a short table, and what it is about as its owner draws it.
+[Composable]
+public component RequestBody(RequestView view, bool withSubject = true, Action? changed = null) {
+  action Changed() { if (changed != null) { changed(); } }
+  render {
+    Stack(gap: 4) {
+      if (view.Context != "") {
+        Text(view.Context, fontSize: FontSize.Subhead, lineHeight: "1.55", color: Colors.OnSurface, maxW: "62ch", whiteSpace: WhiteSpace.PreWrap);
+      }
+      if (view.Facts.Count > 0) {
+        Stack(gap: 0, borderW: 1, border: Colors.Border, rounded: Radius.Lg, bg: Colors.Surface, label: "Facts") {
+          foreach (var fact in view.Facts) {
+            Row(gap: 4, px: 4, py: 3, justify: Justify.Between, align: Align.Baseline) {
+              Text(fact.Label, fontSize: FontSize.Label, color: Colors.TextMuted);
+              Text(fact.Value, fontSize: FontSize.Body, fontWeight: FontWeight.Medium, textAlign: TextAlign.Right);
+            }
+          }
+        }
+      }
+      if (withSubject && view.SubjectId != null) { RequestSubject(view.SubjectType, view.SubjectId.Value, view.Id, Changed); }
+    }
+  }
+}
+
+/// How its time stands, in a line: when it is wanted by, and that late is not closed.
+[Composable]
+public component RequestTime(RequestView view) {
+  render {
+    if (view.DueAt != null) {
+      Row(gap: 2, align: Align.Center, wrap: Wrapping.Wrap) {
+        if (view.Late) {
+          Icon(Icons.Clock, size: 14, color: Colors.Danger.Text);
+          Text("It was wanted by " + When(view.DueAt.Value) + ". It still waits for an answer.", fontSize: FontSize.Label, color: Colors.Danger.Text);
+        } else {
+          Icon(Icons.Clock, size: 14, color: Colors.TextMuted);
+          Text("Wanted by " + When(view.DueAt.Value) + ".", fontSize: FontSize.Label, color: Colors.TextMuted);
+        }
+      }
+    }
+  }
+}
+
+/// Whether a version is a digest — eight or more hexadecimal characters and nothing else.
+bool IsADigest(string version) {
+  if (version.Length < 8) { return false; }
+  foreach (var c in version) { if (!"0123456789abcdefABCDEF".Contains(c.ToString())) { return false; } }
+  return true;
+}
+
+/// What a yes to an approval covers: this, exactly as shown — and nothing it turns into afterwards.
+[Composable]
+public component RequestCovers(RequestView view) {
+  render {
+    if (view.Asks == RequestKind.Approval) {
+      // The version is said when it is something a person reads ("r2", "Quote 114"). A digest of what was shown is
+      // what the approval is checked against, and says nothing to the person giving it.
+      Text((view.About == "" ? "Your approval" : "Your approval of " + view.About) + " covers it exactly as it is shown here"
+           + (view.Version == "" || IsADigest(view.Version) ? "" : " (" + view.Version + ")") + ". If it changes before it is acted on, you are asked again.",
+           fontSize: FontSize.Label, color: Colors.TextSecondary, maxW: "62ch", lineHeight: "1.5", label: "What your approval covers");
+    }
+  }
+}
+
+/// For somebody who reads the request and is not the one asked: who it waits for, and why they cannot answer.
+[Composable]
+public component RequestWaitsFor(RequestView view) {
+  render {
+    Row(gap: 3, align: Align.Center, px: 4, py: 3, bg: Colors.Sunken, rounded: Radius.Lg, label: "Who it waits for") {
+      Lamp(live: true, waiting: true);
+      Stack(gap: 1) {
+        Text("Waiting for " + view.AskedOf, fontSize: FontSize.Body, fontWeight: FontWeight.Medium);
+        if (view.WhyNot != "") { Text(view.WhyNot, fontSize: FontSize.Label, color: Colors.TextMuted); }
+      }
+    }
+  }
+}
+
+/// What came back: the answer with who gave it and when — or why there is none.
+[Composable]
+public component RequestOutcomeBlock(RequestView view, string said = "") {
+  render {
+    Stack(gap: 3, px: 4, py: 4, bg: Colors.Sunken, rounded: Radius.Lg, label: "Answer") {
+      if (view.Status == RequestStatus.Answered) {
+        if (said != "") { Done(said); }
+        if (view.AnswerLines.Count == 0) {
+          Text(view.Answer == "" ? view.Comment : view.Answer, fontSize: FontSize.Heading, fontWeight: FontWeight.Semibold, whiteSpace: WhiteSpace.PreWrap);
+        }
+        if (view.AnswerLines.Count > 0) {
+          Stack(gap: 2) {
+            foreach (var line in view.AnswerLines) {
+              Row(gap: 4, justify: Justify.Between, align: Align.Baseline) {
+                Text(line.Label, fontSize: FontSize.Label, color: Colors.TextMuted);
+                Text(line.Value, fontSize: FontSize.Body, fontWeight: FontWeight.Medium, textAlign: TextAlign.Right);
+              }
+            }
+          }
+        }
+        if (view.Answer != "" && view.Comment != "") { Text(view.Comment, fontSize: FontSize.Body, lineHeight: "1.5", maxW: "62ch"); }
+        Text((view.AnsweredBy == "" ? "Answered" : view.AnsweredBy) + (view.AnsweredAt == null ? "" : ", " + When(view.AnsweredAt.Value)),
+             fontSize: FontSize.Label, color: Colors.TextMuted);
+        if (view.Used) { Text("It has been acted on.", fontSize: FontSize.Label, color: Colors.TextMuted); }
+      } else {
+        Text(view.Status == RequestStatus.Cancelled ? "This request was called off." : "Nobody answered in the time it could wait.",
+             fontSize: FontSize.Subhead, fontWeight: FontWeight.Medium);
+        if (view.ClosedWhy != "" && view.Status == RequestStatus.Cancelled) { Text(view.ClosedWhy, fontSize: FontSize.Body, color: Colors.TextSecondary); }
+      }
+    }
+  }
+}
+
+/// Answers that came after the request was closed: kept, shown, applied to nothing.
+[Composable]
+public component RequestLateAnswers(RequestView view) {
+  render {
+    Stack(gap: 2, label: "Late answers") {
+      SectionLabel("Came too late, and changed nothing");
+      foreach (var late in view.LateAnswers) {
+        Stack(gap: 1, px: 4, py: 3, borderW: 1, border: Colors.Border, rounded: Radius.Md) {
+          Text(late.Said, fontSize: FontSize.Body);
+          Text(late.Who + ", " + When(late.At) + ". " + late.Why + ".", fontSize: FontSize.Label, color: Colors.TextMuted);
+        }
+      }
+    }
+  }
+}
+
+/// ⭐ THE ANSWER, AS THE REQUEST ASKS FOR IT — drawn from what the request offers: a button per option (the one that
+/// says no stands apart, and opens a place to say why), a field per member of the class asked for, or a box to
+/// write in when it offers nothing. `send` is handed the answer; `problem` is what the last try was refused with.
+[Composable]
+public component AnswerControls(RequestView view, Action<AnswerDraft> send, string problem = "") {
+  List<string> keys = [];
+  List<string> typedIn = [];
+  string comment = "";
+  string choosing = "";
+
+  // What is typed into each field, kept side by side with its key.
+  action Typed(string key, string value) {
+    var at = keys.IndexOf(key);
+    if (at < 0) { keys.Add(key); typedIn.Add(value); }
+    else { typedIn[at] = value; }
+  }
+
+  action Pick(RequestOption option) {
+    if (option.NeedsComment && choosing != option.Key) { choosing = option.Key; return; }
+    send(new AnswerDraft { Choice = option.Key, Comment = comment });
+  }
+  action Back() { choosing = ""; comment = ""; }
+  action SendWords() { send(new AnswerDraft { Comment = comment }); }
+  action SendFields() {
+    send(new AnswerDraft { Comment = comment, Keys = keys, Values = typedIn });
+  }
+
+  render {
+    Stack(gap: 4, label: "Your answer") {
+      if (problem != "") { Alert(problem, tone: Tone.Danger); }
+
+      // ── options: a question, or an approval ──
+      if (view.Options.Count > 0) {
+        if (choosing == "") {
+          Row(gap: 2, wrap: Wrapping.Wrap, align: Align.Center) {
+            foreach (var option in view.Options) {
+              if (!option.Grave) { Button(option.Label, onPress: () => Pick(option), tone: OptionTone(view, option), size: Size.Lg); }
+            }
+            Spacer();
+            foreach (var option in view.Options) {
+              if (option.Grave) { Button(option.Label, onPress: () => Pick(option), tone: Tone.Ghost, size: Size.Lg); }
+            }
+          }
+        } else {
+          foreach (var option in view.Options) {
+            if (option.Key == choosing) {
+              Stack(gap: 3) {
+                TextAreaField(view.Asks == RequestKind.Approval ? "Why not?" : "A word of explanation", value: comment, rows: 3,
+                              hint: view.Asks == RequestKind.Approval ? view.AskedBy + " reads this, and can do something about it." : "");
+                Row(gap: 2, justify: Justify.End) {
+                  Button("Back", onPress: Back, tone: Tone.Ghost);
+                  Button(option.Label, onPress: () => Pick(option), tone: option.Grave ? Tone.Danger : Tone.Primary, disabled: comment.Trim() == "");
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // ── a question that offers nothing: answered in words ──
+      if (view.Options.Count == 0 && view.Fields.Count == 0) {
+        TextAreaField("Your answer", value: comment, rows: 4);
+        Row(gap: 2, justify: Justify.End) { Button("Send the answer", onPress: SendWords, tone: Tone.Primary, disabled: comment.Trim() == ""); }
+      }
+
+      // ── information: a field per member of the class asked for ──
+      if (view.Fields.Count > 0) {
+        Stack(gap: 4) {
+          foreach (var f in view.Fields) { AnswerField(f, Typed); }
+          Row(gap: 2, justify: Justify.End) { Button("Send", onPress: SendFields, tone: Tone.Primary); }
+        }
+      }
+    }
+  }
+}
+
+/// One field of the form, as its kind asks: a line, a paragraph, a number, a yes or no, a choice, a date. It keeps
+/// what is typed in it and tells the form (`typed`) each time that changes.
+[Composable]
+public component AnswerField(RequestField field, Action<string, string> typed) {
+  string text = "";
+  bool yes = false;
+  live var label = field.Required ? field.Label : field.Label + " (if any)";
+
+  on change { typed(field.Key, field.Kind == FieldKind.YesNo ? (yes ? "true" : "false") : text); }
+  action Choose(string key) { text = key; }
+
+  render {
+    if (field.Kind == FieldKind.YesNo) {
+      Stack(gap: 1) {
+        Checkbox(field.Label, value: yes);
+        if (field.Help != "") { Hint(field.Help); }
+      }
+    }
+    if (field.Kind == FieldKind.LongText) { TextAreaField(label, value: text, hint: field.Help, rows: 3); }
+    if (field.Kind == FieldKind.Text) { Field(label, value: text, hint: field.Help); }
+    if (field.Kind == FieldKind.Number) { Field(label, value: text, hint: field.Help); }
+    if (field.Kind == FieldKind.Date) { Field(label, value: text, hint: field.Help == "" ? "As 2026-03-14." : field.Help + " As 2026-03-14."); }
+    if (field.Kind == FieldKind.Choice) {
+      Stack(gap: 2, label: label) {
+        FieldLabel(label);
+        Row(gap: 2, wrap: Wrapping.Wrap) {
+          foreach (var c in field.Choices) {
+            if (text == c.Key) { Button(c.Label, onPress: () => Choose(c.Key), tone: Tone.Primary, size: Size.Sm); }
+            else { Button(c.Label, onPress: () => Choose(c.Key), size: Size.Sm); }
+          }
+        }
+        if (field.Help != "") { Hint(field.Help); }
+      }
+    }
+  }
+}
+
+/// The first thing to say yes with is the sheet's one primary button; the rest are plain.
+Tone OptionTone(RequestView view, RequestOption option) {
+  return view.Options.Count > 0 && view.Options[0].Key == option.Key ? Tone.Primary : Tone.Default;
+}
+
+/// An instant as a person reads it: "Wed 11 Mar, 09:00".
+public string When(DateTime at) { return at.ToString("ddd d MMM, HH:mm"); }
+
+// ── behind a link ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// ⭐ THE PAGE SOMEBODY WITH NO ACCOUNT ANSWERS ON. The app gives it a route that takes the link —
+///
+///     [Route("/answer/{link}")] [AllowAnonymous]
+///     component AnswerPage(AnswerLink link) { render { ExternalAnswer(link); } }
+///
+/// — and mails that address when a request is put to somebody outside (`AnswerLinkFor`). It shows the one request the
+/// link was made for, takes the answer and their name, and says what became of it. A link that does not check out
+/// never reaches it: the platform answers that itself.
+[Composable]
+public component ExternalAnswer(AnswerLink link) {
+  RequestView? view = null;
+  bool loaded = false;
+  string problem = "";
+  string name = "";
+  string said = "";
+  bool kept = false;
+
+  action Load() {
+    try { view = ViewByLink(link); } catch (Exception ex) { problem = ex.Message; }
+    loaded = true;
+  }
+  on mount { Load(); }
+
+  action Send(AnswerDraft draft) {
+    problem = "";
+    try {
+      var result = SendAnswerByLink(link, draft, name);
+      said = result.Said;
+      kept = result.Kept;
+      Load();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+
+  render {
+    Stack(gap: 0, w: "100%", minH: "100dvh", bg: Colors.Bg, align: Align.Center, px: 4, py: 8, label: "Answer") {
+      Stack(gap: 5, w: "100%", maxW: "640px", bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, px: 6, py: 6) {
+        if (!loaded) { RequestSkeleton(); }
+        if (loaded && view == null) {
+          EmptyState("This request could not be opened", body: problem == "" ? "Try the link in the latest message you were sent." : problem);
+        }
+        if (view != null) {
+          RequestHead(view);
+          if (said != "") {
+            Stack(gap: 2, px: 4, py: 4, bg: Colors.Sunken, rounded: Radius.Lg, label: "Received") {
+              if (!kept) { Done("Sent"); }
+              Text(said, fontSize: FontSize.Subhead, lineHeight: "1.5");
+            }
+          }
+          if (said == "") {
+            RequestBody(view, withSubject: false);
+            if (view.MayAnswer) {
+              RequestTime(view);
+              Field("Your name", value: name, hint: "Kept with your answer.");
+              AnswerControls(view, Send, problem);
+            } else {
+              RequestOutcomeBlock(view);
+              if (view.Status != RequestStatus.Answered) {
+                Stack(gap: 3) {
+                  Text("You can still send your answer. It will be kept and passed on, and it changes nothing by itself.",
+                       fontSize: FontSize.Label, color: Colors.TextMuted);
+                  Field("Your name", value: name);
+                  AnswerControls(view, Send, problem);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// ── waiting on people ───────────────────────────────────────────────────────────────────────────────────────────────
+
+/// One open request in a list of what is waited on.
+public class WaitLine {
+  public Guid Id;
+  public string Title = "";
+  public string Who = "";
+  public string AskedBy = "";
+  public DateTime Since;
+  public DateTime? DueAt;
+  public bool Late = false;
+  public int Reminders = 0;
+  public string Waiting = "";
+}
+
+/// The open requests that hold up one piece of work (`waitingType` + `waitingId`), or that one process or agent has
+/// put (`askedByName`) — as whoever is looking may read them.
+[Server, Authorize(IsAuthenticated)]
+public List<WaitLine> WaitingLines(string askedByName = "", string waitingType = "", Guid? waitingId = null) {
+  List<HumanRequest> open = [];
+  if (waitingId != null) { open = Requests.WaitedOnBy(waitingType, waitingId!.Value); }
+  else if (askedByName != "") { open = Requests.PutBy(askedByName); }
+  else { open = HumanRequest.Where(r => r.Status == RequestStatus.Open).OrderBy(r => r.ArrivedAt).Take(200).ToList(); }
+  return LinesOf(open);
+}
+
+/// The same for the requests a caller names — a kit that keeps its own list of what something waits on. Those that
+/// are closed, or not the reader's to read, are left out.
+[Server, Authorize(IsAuthenticated)]
+public List<WaitLine> WaitingLinesOf(List<Guid> requests) {
+  if (requests.Count == 0) { return []; }
+  return LinesOf(HumanRequest.Where(r => r.Status == RequestStatus.Open && requests.Contains(r.Id)).OrderBy(r => r.ArrivedAt).Take(200).ToList());
+}
+
+List<WaitLine> LinesOf(List<HumanRequest> open) {
+  List<WaitLine> lines = [];
+  foreach (var r in open) {
+    lines.Add(new WaitLine {
+      Id = r.Id, Title = r.Title, Who = r.OutsideEmail != "" ? OutsideWho(r) : AskedWho(r), AskedBy = AskerWords(r), Since = r.ArrivedAt,
+      DueAt = r.DueAt, Late = r.OverdueAt != null, Reminders = r.Reminders, Waiting = r.WaitingLabel,
+    });
+  }
+  return lines;
+}
+
+/// ⭐ WHO IS BEING WAITED ON — every open request behind one piece of work, or put by one process or agent: what is
+/// asked, of whom, since when, and whether it is late. `open` says where a request's own page is, so each line is a
+/// link. Place it on the page of the thing that waits: `WaitingOnPeople(waitingType: "Quote", waitingId: quote.Id)`.
+/// A kit that keeps its own list of what something waits on names the requests instead: `requests: ids`.
+[Composable]
+public component WaitingOnPeople(string askedByName = "", string waitingType = "", Guid? waitingId = null, Func<Guid, string>? open = null, List<Guid>? requests = null) {
+  List<WaitLine> lines = [];
+  bool loaded = false;
+
+  on mount {
+    if (requests != null) { lines = WaitingLinesOf(requests); }
+    else { lines = WaitingLines(askedByName, waitingType, waitingId); }
+    loaded = true;
+  }
+
+  render {
+    Stack(gap: 3, w: "100%", label: "Waiting on people") {
+      Row(gap: 2, align: Align.Baseline) {
+        SectionLabel("Waiting on people");
+        if (loaded && lines.Count > 0) { Text(lines.Count.ToString(), fontSize: FontSize.Label, color: Colors.TextMuted); }
+      }
+      if (!loaded) { Stack(gap: 2) { Skeleton(); Skeleton(SkeletonShape.HalfLine); } }
+      if (loaded && lines.Count == 0) {
+        Row(gap: 2, align: Align.Center, px: 4, py: 3, bg: Colors.Sunken, rounded: Radius.Lg) {
+          Icon(Icons.Check, size: 14, color: Colors.Success.Text);
+          Text("Nobody is being waited on.", fontSize: FontSize.Body, color: Colors.TextSecondary);
+        }
+      }
+      if (lines.Count > 0) {
+        Stack(gap: 0, borderW: 1, border: Colors.Border, rounded: Radius.Lg, bg: Colors.Surface) {
+          foreach (var line in lines) { WaitRow(line, open); }
+        }
+      }
+    }
+  }
+}
+
+/// One line of it: a lamp that is steady while the request is in time and turns when it is late, what is asked, of
+/// whom, and how long it has waited.
+[Composable]
+public component WaitRow(WaitLine line, Func<Guid, string>? open = null) {
+  live var since = "since " + line.Since.ToString("ddd d MMM, HH:mm");
+  live var due = line.DueAt == null ? "" : (line.Late ? "was wanted by " : "wanted by ") + line.DueAt.Value.ToString("ddd d MMM, HH:mm");
+  render {
+    Row(gap: 3, px: 4, py: 3, align: Align.Start) {
+      Box(pt: 1) { Lamp(lit: true, live: !line.Late, tone: line.Late ? Tone.Danger : Tone.Default, waiting: !line.Late); }
+      Stack(gap: 1, grow: 1, minW: "0") {
+        if (open != null) { TextLink(line.Title, to: open(line.Id)); }
+        if (open == null) { Text(line.Title, fontSize: FontSize.Body, fontWeight: FontWeight.Medium); }
+        Text("Asked of " + line.Who + ", " + since + (due == "" ? "" : ", " + due) + ".", fontSize: FontSize.Label, color: Colors.TextMuted);
+        if (line.Reminders > 0) {
+          Text(line.Reminders == 1 ? "Reminded once." : "Reminded " + line.Reminders + " times.", fontSize: FontSize.Label, color: Colors.TextMuted);
+        }
+      }
+      if (line.Late) { Badge("Late", tone: Tone.Danger); }
+    }
+  }
+}
+
+// ── many at once ────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Approve every one of `ids` that is the caller's to approve — each as their own answer, one at a time, so a
+/// request that is not theirs (or is no longer open) is left exactly as it was. Answers how many were approved.
+[Server, Authorize(IsAuthenticated)]
+public int ApproveRequests(List<Guid> ids) {
+  var approved = 0;
+  foreach (var id in ids) {
+    var request = HumanRequest.FirstOrDefault(r => r.Id == id);
+    if (request == null || request!.Asks != RequestKind.Approval || request!.Status != RequestStatus.Open) { continue; }
+    try {
+      if (AnswerRequest(request!, RequestAnswer.Approve()).Applied) { approved = approved + 1; }
+    } catch (RequestRefused refused) { }
+  }
+  return approved;
+}
+
+/// "Approve all" on the inbox's bulk bar — only while every picked item is an approval.
+[Contribution("Approve all")]
+component ApproveManyRequests(string kind, List<Guid> ids, Action<string> done) : WorkBulkAction {
+  action Approve() {
+    var n = ApproveRequests(ids);
+    done(n == ids.Count ? "Approved " + n + "." : "Approved " + n + " of " + ids.Count + ". The rest are not yours to approve, or are no longer open.");
+  }
+  render {
+    if (kind == RequestKindKey(RequestKind.Approval)) { Button("Approve all", onPress: Approve, size: Size.Sm, tone: Tone.Primary); }
+  }
+}

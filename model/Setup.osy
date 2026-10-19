@@ -1,0 +1,73 @@
+// What the app says: who may put requests to people, who oversees them, and how they are asked by default.
+namespace Osysharp.HumanRequests;
+
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+
+/// Who may put a request to a person. Nobody, until the app says: `policy AsksPeople => IsStaff;`. A process — a
+/// workflow's body, a timer — asks as the app and is not asked this.
+virtual policy AsksPeople => false;
+
+/// Who reads every request, calls one off and gives it more time. Nobody, until the app says:
+/// `policy OverseesRequests => IsLead;`.
+virtual policy OverseesRequests => false;
+
+/// Who may erase who a request was put to and what they answered — nobody, until the app says. A privacy request's
+/// own run does it as the app (`Osysharp.Privacy.HumanRequests`).
+virtual policy ErasesRequestRecords => false;
+
+/// Who reaches the functions that act on a request that exists — call it off, give it time, use its approval, send
+/// its link: anybody signed in, and the app itself (a process). WHO may do WHICH to WHICH request is each function's
+/// own check.
+policy HandlesRequests => IsAuthenticated;
+
+/// Who reaches the function that writes an answer: anybody at all — signed in, or holding a request's link. WHO may
+/// answer WHICH request is that function's own check, made before it writes.
+policy AnswersRequests => IsAuthenticated || IsAnonymous;
+
+/// How this app asks people — `app.Requests = new RequestsSetup { Queue = "Approvals", RemindAfter = TimeSpan.FromHours(4) };`.
+[AppSetting("Requests")]
+public class RequestsSetup {
+  /// The work queue a request waits in when it names none. "": the inbox's own default queue.
+  public string Queue = "";
+  /// How long a request may wait for its answer when it does not say — counted in its hours. Null: as long as it takes.
+  public TimeSpan? Within;
+  /// When the person asked is reminded the first time, and how often after that, when the request does not say.
+  /// Null: never.
+  public TimeSpan? RemindAfter;
+  public TimeSpan? RemindEvery;
+  /// The most times one request reminds anybody.
+  public int MaxReminders = 3;
+  /// How long the link sent to somebody without an account is shown to work — said in the words sent with it. The
+  /// link itself stops working after `AnswerLink`'s own thirty days.
+  public string LinkGoodFor = "thirty days";
+  /// The sentences the kit says. Override one to say it in the app's own voice.
+  public RequestWords Words = new RequestWords();
+}
+
+/// The sentences the kit says to the people it asks. Override a method to change one:
+///   `public class DeskWords : RequestWords { public override string Thanks() { return "Thank you. We have it."; } }`
+public class RequestWords {
+  /// What the form of a request for approval calls its two answers.
+  public virtual string Approve() { return "Approve"; }
+  public virtual string Reject() { return "Reject"; }
+  /// What somebody reads after answering through a link.
+  public virtual string Thanks() { return "Thank you. Your answer has been passed on."; }
+  /// …and when their answer came after the request was closed.
+  public virtual string TooLate() { return "This request was already closed. Your answer has been kept and passed on, and changes nothing by itself."; }
+  /// The line of a reminder: what is still waiting, and since when.
+  public virtual string Reminder(HumanRequest request) {
+    return request.DueAt == null ? $"Still waiting for your answer: {request.Title}"
+                                 : $"Still waiting for your answer, due {request.DueAt.Value.ToString("d MMM HH:mm")} UTC: {request.Title}";
+  }
+}
+
+// ── refusals ────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// A request that could not be put, answered or used — with the reason, in words a person can act on.
+/// A `ValidationException`, so the reason reaches whoever asked — a model whose tool ran into it included.
+public class RequestRefused : ValidationException { }
+
+/// An approval that does not cover the act: it was not a yes, what was approved has changed since, it has already
+/// been acted on, or it is not an approval at all. Ask again — `ReplaceRequest` — for the thing as it is now.
+public class ApprovalNoLongerApplies : RequestRefused { }

@@ -1,0 +1,258 @@
+// A boatyard: the people who work it, the boats and their quotes, and what the yard asks of people.
+namespace Boatyard;
+
+using Osysharp.Identity;
+using Osysharp.Organizations;
+using Osysharp.WorkQueues;
+using Osysharp.HumanRequests;
+using Osysharp.Workflow;
+using Osysharp.ServiceHours;
+
+[Role] enum YardRole { Authenticator, Hand, Foreman, Manager, Owner }
+
+partial entity RoleGrant { security { allow read when IsAuthenticated; } }
+
+policy IsHand    => RoleGrant.Any(g => g.Member == user && g.Role == YardRole.Hand);
+policy IsForeman => RoleGrant.Any(g => g.Member == user && g.Role == YardRole.Foreman);
+policy IsManager => RoleGrant.Any(g => g.Member == user && g.Role == YardRole.Manager);
+policy IsYardOwner => RoleGrant.Any(g => g.Member == user && g.Role == YardRole.Owner);
+policy IsYardStaff => IsHand || IsForeman || IsManager || IsYardOwner;
+
+// The inbox's three questions: everybody at the yard works it; the manager and the owner lead and administer it.
+policy WorksInbox       => IsYardStaff;
+policy LeadsInbox       => IsManager || IsYardOwner;
+policy AdministersInbox => IsYardOwner;
+policy ManagesOrganizations  => IsYardOwner;
+policy CollaboratesOnRecords => IsYardStaff;
+// The kit's two: the yard's people put requests; the owner of the yard oversees them.
+policy AsksPeople       => IsYardStaff;
+policy OverseesRequests => IsYardOwner;
+
+/// Somebody at the yard.
+entity Person : Principal {
+  [MaxLength(200)] string CodeHash = "";
+  security {
+    allow read when IsAuthenticated || IsAuthenticator;
+    allow create when IsAuthenticator;
+    deny read CodeHash when !IsAuthenticator;
+  }
+}
+
+partial entity ServiceHours { security { allow read when IsYardStaff; allow create, update, delete when IsYardOwner; } }
+partial entity ServiceWindow { security { allow read when IsYardStaff; allow create, update, delete when IsYardOwner; } }
+partial entity ServiceException { security { allow read when IsYardStaff; allow create, update, delete when IsYardOwner; } }
+
+// The inbox's own item type, read through the inbox's screens: the yard's people read what each kind lets them.
+partial entity WorkItem { security { allow read when IsYardStaff; } }
+
+/// A boat in the yard.
+entity Boat {
+  [Required, Unique, MaxLength(80)] string Name;
+  [MaxLength(120)] string OwnerName = "";
+  [MaxLength(200)] string OwnerEmail = "";
+  /// Which slip it is on, once the foreman has said.
+  [MaxLength(40)] string Slip = "";
+  /// What the owner told us about it.
+  [MaxLength(40)] string Registration = "";
+  decimal LengthMetres = 0;
+  bool Insured = false;
+  security { allow read, create, update when IsYardStaff; }
+}
+
+public enum QuoteStage { Drafted, WaitingForApproval, Approved, Declined, Lapsed }
+
+/// What the yard will charge for a piece of work. Every change to its lines is a new revision.
+entity Quote {
+  [Required] Boat Boat;
+  [Required, MaxLength(200)] string Work;
+  decimal Amount;
+  /// Counts up with every change to what is quoted.
+  int Revision = 1;
+  QuoteStage Stage = QuoteStage.Drafted;
+  /// It was sent to the boat's owner — once, for the revision that was approved.
+  bool Sent = false;
+  [MaxLength(600)] string Note = "";
+  security { allow read, create, update when IsYardStaff; }
+}
+
+/// What the owner of a boat is asked for.
+public class BoatPapers {
+  /// The registration number painted on the hull.
+  [MaxLength(40)] public string Registration = "";
+  /// Its length overall, in metres.
+  public decimal LengthMetres;
+  /// Whether it is insured while it is in the yard.
+  public bool Insured;
+  /// Anything the yard should know before it lifts her.
+  public string? Notes;
+}
+
+// ── what the yard asks ──────────────────────────────────────────────────────────────────────────────────────────────
+
+/// What a quote is, as the manager is shown it — and the version an approval is of.
+public Subject QuoteAsShown(Quote q) {
+  return Subject.Of("Quote", q.Id, q.Work + " on " + q.Boat.Name, version: "r" + q.Revision.ToString());
+}
+
+/// Ask the manager to approve a quote as it stands.
+public HumanRequest AskApproval(Quote q, Person manager, TimeSpan? within = null, ServiceHours? hours = null) {
+  return PutRequest(new NewRequest {
+    Kind = RequestKind.Approval, To = manager, Title = "Approve the quote for " + q.Boat.Name + "?",
+    Context = q.Work + ". It is over what the foreman may quote alone.",
+    Facts = [new RequestFact("Amount", q.Amount.ToString("0.00") + " EUR"), new RequestFact("Revision", q.Revision.ToString())],
+    About = QuoteAsShown(q), WaitingWork = Subject.Of("Quote", q.Id, "the quote for " + q.Boat.Name), Within = within, Hours = hours,
+  });
+}
+
+/// Send the quote to the boat's owner — covered by the manager's approval of this revision, and done once.
+public void SendQuote(Quote q, HumanRequest approval) {
+  UseApproval(approval, "r" + q.Revision.ToString());
+  q.Sent = true;
+}
+
+/// Change what is quoted: a new revision.
+public void Requote(Quote q, decimal amount) {
+  q.Amount = amount;
+  q.Revision = q.Revision + 1;
+}
+
+/// Ask the foreman which slip a boat goes on.
+public HumanRequest AskWhichSlip(Boat boat, Person foreman) {
+  return PutRequest(new NewRequest {
+    Kind = RequestKind.Question, To = foreman, Title = "Which slip for " + boat.Name + "?",
+    Context = "She is due in on the morning tide.",
+    Options = [RequestOption.Of("North slip"), RequestOption.Of("South slip"), RequestOption.Of("Keep her afloat", needsComment: true)],
+    About = Subject.Of("Boat", boat.Id, boat.Name),
+  });
+}
+
+/// Ask whoever works the yard's queue — nobody by name.
+public HumanRequest AskTheYard(string question) {
+  return PutRequest(new NewRequest { Kind = RequestKind.Question, Title = question });
+}
+
+/// The same, with somebody who may not answer it though they work the yard's queue.
+public HumanRequest AskTheYardNotBy(string question, Person notBy) {
+  return PutRequest(new NewRequest { Kind = RequestKind.Question, Title = question, NotBy = notBy });
+}
+
+/// Ask a boat's owner — who has no account — for her papers.
+public HumanRequest AskForPapers(Boat boat, TimeSpan? within = null, TimeSpan? expireAfter = null) {
+  var ask = NewRequest.For<BoatPapers>();
+  ask.Title = "The papers for " + boat.Name;
+  ask.Context = "Before we lift her we need her registration, her length and whether she is insured in the yard.";
+  ask.OutsideName = boat.OwnerName;
+  ask.OutsideEmail = boat.OwnerEmail;
+  ask.About = Subject.Of("Boat", boat.Id, boat.Name);
+  ask.Within = within;
+  ask.ExpireAfter = expireAfter;
+  return PutRequest(ask);
+}
+
+/// The same asked of one of the yard's own people.
+public HumanRequest AskAHandForPapers(Boat boat, Person hand) {
+  var ask = NewRequest.For<BoatPapers>();
+  ask.Title = "The papers for " + boat.Name;
+  ask.To = hand;
+  ask.About = Subject.Of("Boat", boat.Id, boat.Name);
+  return PutRequest(ask);
+}
+
+// ── a process that waits for a person ───────────────────────────────────────────────────────────────────────────────
+
+/// A quote's way out of the yard: the manager is asked to approve it as it stands, the process waits — as long as
+/// that takes — and what it does next is what the manager said.
+workflow QuoteFlow {
+  Tracks = Quote.Stage; Autostart = false; Initial = WaitingForApproval;
+  state WaitingForApproval {
+    enter {
+      var request = Workflow.Once("ask-manager", () => AskApproval(this.Item, TheManager(), TimeSpan.FromHours(16), YardHours()));
+      var answer = await Requests.Answer(request);
+      if (answer.Approved) {
+        UseApproval(request, "r" + this.Item.Revision.ToString());
+        this.Item.Sent = true;
+        this.Item.Note = "Approved by " + answer.ByName + ".";
+        goto Approved;
+      }
+      if (answer.Rejected) {
+        this.Item.Note = "Declined: " + answer.Comment;
+        goto Declined;
+      }
+      this.Item.Note = "No answer: " + answer.ClosedWhy;
+      goto Lapsed;
+    }
+  }
+  terminal success Approved { }
+  terminal success Declined { }
+  terminal cancel  Lapsed { Message = "nobody approved the quote"; }
+}
+
+Person TheManager() { return Person.Single(p => p.Email == "marit@kestrelyard.example"); }
+ServiceHours? YardHours() { return ServiceHours.FirstOrDefault(h => h.Name == "Yard hours"); }
+
+// ── what the yard hears ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Something the yard was told, so a test can read what happened.
+entity Heard {
+  [Required, MaxLength(40)] string What;
+  [MaxLength(2000)] string About = "";
+  DateTime At = DateTime.UtcNow;
+  security { allow read, create when IsAuthenticated || IsAnonymous; }
+}
+
+[On] void RequestWasPut(HumanRequestPut e) { new Heard { What = "put", About = e.Request.Title }; }
+[On] void RequestWasAnswered(HumanRequestAnswered e) { new Heard { What = "answered", About = e.Request.Title + " → " + e.Request.Choice }; }
+[On] void SomebodyWasReminded(HumanRequestReminded e) { new Heard { What = "reminded", About = e.Number.ToString() + ": " + e.Words }; }
+[On] void RequestIsLate(HumanRequestOverdue e) { new Heard { What = "overdue", About = e.Request.Title + (e.EscalatedTo == null ? "" : " → " + e.EscalatedTo!.DisplayName) }; }
+[On] void RequestRanOut(HumanRequestExpired e) { new Heard { What = "expired", About = e.Request.Title }; }
+[On] void RequestWasCalledOff(HumanRequestCancelled e) { new Heard { What = "called off", About = e.Why }; }
+[On] void TimeChanged(HumanRequestRetimed e) { new Heard { What = "retimed", About = e.Why }; }
+[On] void LateAnswerKept(HumanRequestAnsweredLate e) { new Heard { What = "late", About = e.Late.Why.Name + ": " + e.Late.Choice + e.Late.Comment }; }
+
+/// The owner's papers, written onto the boat when they arrive.
+[On] void PapersArrived(HumanRequestAnswered e) {
+  if (e.Request.AnswerType != typeof(BoatPapers).FullName || e.Request.SubjectId == null) { return; }
+  var papers = OutcomeOf(e.Request).As<BoatPapers>();
+  var boat = Boat.Single(b => b.Id == e.Request.SubjectId);
+  boat.Registration = papers.Registration;
+  boat.LengthMetres = papers.LengthMetres;
+  boat.Insured = papers.Insured;
+}
+
+// ── what app code is not able to do ─────────────────────────────────────────────────────────────────────────────────
+
+/// A request made up without `PutRequest`.
+/// Approve a request as whoever runs this — a rule, a script or a model's tool runs it the way a person would.
+[Action("Approve a request")]
+public string ApproveRequest(HumanRequest request) {
+  AnswerRequest(request, RequestAnswer.Approve());
+  return "Approved.";
+}
+
+public void ForgeRequest(Person to) { new HumanRequest { Title = "Forged", To = to }; }
+
+/// An answer written straight onto the row.
+public void ForgeAnswer(HumanRequest request) {
+  request.Choice = "approve";
+  request.AnsweredAt = DateTime.UtcNow;
+}
+
+/// An approval marked as used — or as not used — by hand.
+public void ForgeUse(HumanRequest request) { request.ActedAt = null; request.ActedVersion = ""; }
+
+/// More time, taken without `ExtendRequest`.
+public void ForgeTime(HumanRequest request) { request.AnswerWithin = TimeSpan.FromDays(400); }
+
+app.Inbox = new InboxSetup { DefaultQueue = "Yard" };
+
+[AuthMethod]
+string SignInWithCode(string email, string code) {
+  var p = Person.FirstOrDefault(x => x.Email == NormalisedEmail(email));
+  if (p == null || !p.IsActive) { Security.VerifyPassword(code); return ""; }
+  if (!Security.VerifyPassword(code, p.CodeHash)) { return ""; }
+  return Security.IssueJwt(p.Id, p.Email);
+}
+
+app.AuthBootstrap = new AuthBootstrap { Role = YardRole.Authenticator, Login = SignInWithCode };
+app.Auth = new PasswordAuth { LoginField = Email, PasswordField = CodeHash };
+app.Audit = new AuditConfig { Redact = new AuditRedaction { Properties = [Boatyard.Person.CodeHash] } };

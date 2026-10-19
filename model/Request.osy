@@ -1,0 +1,445 @@
+// The request — one row per thing put to a person: who asked, about what, what they may answer, by when, and what
+// came back.
+namespace Osysharp.HumanRequests;
+
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+
+/// What is asked of the person. ⚠ Appended, never inserted: an enum is stored by position.
+public enum RequestKind {
+  /// A question, answered with one of the options it offers — or in words, when it offers none.
+  [Label("Question")] Question,
+  /// A yes or a no to one exact thing. A no says why.
+  [Label("Approval")] Approval,
+  /// Facts only they have: the fields of a class the asker declares.
+  [Label("Information")] Information,
+}
+
+/// Where a request stands. ⚠ Appended, never inserted.
+public enum RequestStatus {
+  /// It is waiting for its answer — in time, or past its date.
+  [Label("Waiting")] Open,
+  [Label("Answered")] Answered,
+  /// It ran out of the time it could wait at all, and nobody had answered.
+  [Label("Ran out of time")] Expired,
+  /// Whoever asked, or whoever oversees requests, called it off.
+  [Label("Called off")] Cancelled,
+}
+
+/// Who put the request. ⚠ Appended, never inserted.
+public enum AskerKind {
+  [Label("A person")] Person,
+  /// A workflow, a timer — the app itself.
+  [Label("A process")] Process,
+  /// An AI agent, working for the person in `AskedBy` (or for the app, when there is none).
+  [Label("An agent")] Agent,
+}
+
+/// How the person who answered was known. ⚠ Appended, never inserted.
+public enum Assurance {
+  /// They were signed in to the app.
+  [Label("Signed in")] SignedIn,
+  /// They held the link that was sent to them — as sure as their mailbox is theirs.
+  [Label("Held the link")] Link,
+}
+
+/// Why an answer was kept and not applied. ⚠ Appended, never inserted.
+public enum LateWhy {
+  [Label("It had already been answered")] AlreadyAnswered,
+  [Label("It had been called off")] Cancelled,
+  [Label("It had run out of time")] Expired,
+}
+
+/// ⭐ ONE REQUEST PUT TO A PERSON. An ordinary item of the app's work queues: it waits in a queue, the person it is put
+/// to holds it, and its promises are the inbox's.
+///
+/// Made only by `PutRequest`; answered only through `AnswerRequest` / `AnswerByLink`; everything about its time is
+/// written by its own run.
+public entity HumanRequest : WorkItem {
+  [Immutable] RequestKind Asks = RequestKind.Question;
+  /// Where it stands — its own run's alone.
+  RequestStatus Status;                                 // no default — RequestFlow owns it
+
+  // ── who asked ──
+  [Immutable] AskerKind AskedByKind = AskerKind.Person;
+  /// The person who asked, or for whom a process or an agent asked. Read from who was signed in, never told.
+  [Immutable] Principal? AskedBy;
+  /// The process or the agent that asked, as a person reads it — "Supplier onboarding", "Inspector". "": a person.
+  [Immutable, MaxLength(200)] string AskedByName = "";
+  /// The asking person's name as it was when they asked — what somebody outside, who cannot look the person up, is
+  /// told. "": nobody (the app asked).
+  [Immutable, MaxLength(200)] string AskedByPerson = "";
+
+  // ── who is asked ──
+  /// The person it is put to. Null: whoever works the queue it waits in — or somebody outside (`OutsideEmail`).
+  Principal? To;
+  /// Somebody with no account: who they are, and where the link was sent. "": the request is for people inside.
+  [MaxLength(200)] string OutsideName = "";
+  [MaxLength(200)] string OutsideEmail = "";
+  /// Who it went to when nobody had answered in time. Null: nobody yet.
+  Principal? EscalatedTo;
+
+  // ── what it is about, and what is waiting for it ──
+  /// The record it is about: the kind of record, its id, what a person calls it — and the VERSION of it that was
+  /// shown, in whatever terms the asker versions it (a revision number, a hash of what was shown).
+  [Immutable, MaxLength(200)] string SubjectType = "";
+  [Immutable] Guid? SubjectId;
+  [MaxLength(300)] string SubjectLabel = "";
+  [Immutable, MaxLength(200)] string SubjectVersion = "";
+  /// The work that cannot go on until this is answered — a piece of an agent's work, a process, an assignment.
+  [Immutable, MaxLength(200)] string WaitingType = "";
+  [Immutable] Guid? WaitingId;
+  [Immutable, MaxLength(300)] string WaitingLabel = "";
+
+  /// Somebody who may not answer it — see `NewRequest.NotBy`.
+  [Immutable] Principal? NotBy;
+
+  // ── what the person is shown ──
+  /// What they need to know to answer, in plain words.
+  [Classification(Personal.Content), MaxLength(8000)] string Context = "";
+  /// The facts shown beside it — "Amount: 42.00 EUR" — as a list of `RequestFact`.
+  string FactsJson = "[]";
+  /// What it may be answered with (`RequestOption`), and — for information — the fields to fill in (`RequestField`).
+  [Immutable] string OptionsJson = "[]";
+  [Immutable] string FieldsJson = "[]";
+  /// The class the answer is read as (`RequestOutcome.As<T>()`), by its full name. "": none.
+  [Immutable, MaxLength(200)] string AnswerType = "";
+
+  // ── time ──
+  /// The hours its time is counted in. None: around the clock.
+  [Immutable] Osysharp.ServiceHours.ServiceHours? AnswerHours;
+  /// How long it may wait before it is late. Null: no date. Late is not closed: it still waits, and says so.
+  TimeSpan? AnswerWithin;
+  /// How long it may wait at all. Null: until it is answered or called off.
+  TimeSpan? ExpireAfter;
+  /// When the person asked is reminded the first time, how often after that, and the most times in all.
+  [Immutable] TimeSpan? RemindAfter;
+  [Immutable] TimeSpan? RemindEvery;
+  [Immutable] int MaxReminders = 3;
+  int Reminders = 0;
+  DateTime? LastRemindedAt;
+  /// Who it goes to when it is late. Null: nobody — the event `HumanRequestOverdue` is the whole of it.
+  [Immutable] Principal? EscalateTo;
+  DateTime? OverdueAt;
+
+  // ── the answer ──
+  /// The option chosen — an option's `Key`; for an approval "approve" or "reject". "": none was offered.
+  [MaxLength(200)] string Choice = "";
+  /// The fields filled in, as JSON of the class in `AnswerType`.
+  string? AnswerJson;
+  /// What they wrote beside it — the reason for a no.
+  [Classification(Personal.Content), MaxLength(4000)] string Comment = "";
+  Principal? AnsweredBy;
+  /// Who answered through a link, as they gave their name.
+  [MaxLength(200)] string AnsweredByName = "";
+  Assurance? AnsweredWith;
+  DateTime? AnsweredAt;
+
+  // ── an approval, acted on ──
+  /// When the approval was used, and for which version of what it approved. An approval is used once.
+  DateTime? ActedAt;
+  [MaxLength(200)] string ActedVersion = "";
+
+  // ── the process that asked ──
+  /// The workflow run whose body put it — a process asking a person: the run, the workflow's name, the state that
+  /// put it, the row the run tracks and the run that started it (`Workflow.Current`, read where the request is put).
+  /// Null and "": it was put outside a run. What a kit that tells a run its steps reads (`Osysharp.HumanRequests.Processes`).
+  [Immutable] Guid? Run;
+  [Immutable, MaxLength(200)] string RunWorkflow = "";
+  [Immutable, MaxLength(200)] string RunState = "";
+  [Immutable] Guid? RunItem;
+  [Immutable] Guid? RunStarter;
+
+  // ── erasure ──
+  /// Who it was put to and what they said were erased, at their request, and why. The request keeps its place:
+  /// that it was put, what kind of thing it asked, when, and how it ended.
+  DateTime? ErasedAt;
+  [MaxLength(300)] string ErasedWhy = "";
+
+  // ── closing ──
+  /// Somebody asked for it to be called off, and why — the run closes it.
+  bool CallOffAsked = false;
+  [MaxLength(600)] string ClosedWhy = "";
+  /// The request this one was put in place of — the same question, about the thing as it is now.
+  [Immutable] HumanRequest? Replaces;
+
+  [ForeignKey(Request)] LateAnswer[] LateAnswers;
+
+  security {
+    // Whoever it is put to, whoever it went on to, whoever holds it, and whoever asked.
+    allow read when IsAuthenticated where To == user || EscalatedTo == user || Assignee == user || AskedBy == user;
+    // Put to nobody by name: the people who work the queue it waits in (the inbox's own rules narrow that).
+    allow read when WorksInbox where To == null && OutsideEmail == "";
+    allow read when OverseesRequests;
+    allow read by AnswerLink;
+
+    allow create when AsksPeople;
+    deny create except via PutRequest;
+
+    // The write that carries an answer or a call-off is each function's own — the columns below say which.
+    allow update when IsAuthenticated where To == user || EscalatedTo == user || Assignee == user || AskedBy == user;
+    allow update when WorksInbox where To == null && OutsideEmail == "";
+    allow update when OverseesRequests;
+    allow update when ErasesRequestRecords;
+    allow update Choice, AnswerJson, Comment, AnsweredByName, AnsweredWith, AnsweredAt by AnswerLink;
+
+    // SECURITY-INVARIANT(requests-are-answered-only-by-who-was-asked): an answer is written by `RecordAnswer` alone,
+    // which asks who is answering before it writes — the person it was put to, the person it went on to, whoever
+    // holds it, the people of its queue when it names nobody, the holder of its link when it was sent outside — and
+    // never the person who asked. `EraseFromRequest` only BLANKS what was answered, for a privacy request; it writes
+    // no answer. Guarded by tests/security.test.osy `only_who_was_asked_answers` and
+    // `whoever_asked_cannot_answer_their_own_request`.
+    deny update Choice, AnsweredWith, AnsweredAt except via RecordAnswer;
+    deny update AnswerJson, Comment, AnsweredBy, AnsweredByName except via RecordAnswer, EraseFromRequest;
+    // Who it was put to, what they were shown, and what it was about are fixed when it is put — and erased only by a
+    // privacy request, never rewritten.
+    deny update To, OutsideName, OutsideEmail, SubjectLabel, Context, FactsJson, ErasedAt, ErasedWhy except via EraseFromRequest;
+    // SECURITY-INVARIANT(an-approval-is-used-once-for-the-version-approved): the mark that an approval was acted on
+    // is written by `UseApproval` alone, which refuses a version other than the one approved. Guarded by
+    // tests/approvals.test.osy `an_approval_does_not_cover_what_changed_after_it_was_given`.
+    deny update ActedAt, ActedVersion except via UseApproval;
+    // SECURITY-INVARIANT(a-requests-time-and-end-are-its-askers): calling a request off and changing its time are its
+    // asker's and the overseers' — never the person asked's, who may otherwise update the row to answer it. Each is
+    // written by one function that asks who is calling first. Guarded by tests/security.test.osy
+    // `calling_a_request_off_is_its_askers_and_the_overseers` and `a_requests_time_is_changed_only_by_extending_it`.
+    deny update CallOffAsked except via CancelRequest;
+    deny update ClosedWhy except via CancelRequest, GiveUpOnRequest;
+    // Its time is its run's: no page, function or import writes these.
+    deny update AnswerWithin, ExpireAfter except via ExtendRequest;
+    deny update OverdueAt except via ExtendRequest, LateOf;
+    deny update Reminders, LastRemindedAt, EscalatedTo;
+    deny delete;
+  }
+}
+
+/// The link sent to somebody with no account: it opens the one request it was made for, lets its holder answer it,
+/// and nothing else in the app. It works for thirty days, or until `RevokeAnswerLink`.
+public grant AnswerLink for HumanRequest { Expires = TimeSpan.FromDays(30); }
+
+/// ⭐ AN ANSWER THAT CAME TOO LATE — after the request was answered, called off or ran out of time. Kept, with who
+/// sent it and when; it changes nothing.
+public entity LateAnswer {
+  [Required, Immutable, Index] HumanRequest Request;
+  [Immutable] LateWhy Why = LateWhy.AlreadyAnswered;
+  [Immutable, MaxLength(200)] string Choice = "";
+  [Immutable] string? AnswerJson;
+  [Immutable, Classification(Personal.Content), MaxLength(4000)] string Comment = "";
+  [Immutable] Principal? By;
+  [Immutable, MaxLength(200)] string ByName = "";
+  [Immutable] Assurance With = Assurance.SignedIn;
+  [Immutable] DateTime At = DateTime.UtcNow;
+
+  security {
+    allow read when IsAuthenticated where Request.AskedBy == user || By == user;
+    allow read when OverseesRequests;
+    allow create when IsAuthenticated;
+    allow create by AnswerLink where Request == AnswerLink.Row;
+    deny create except via RecordAnswer;
+    deny update;
+    deny delete;
+  }
+}
+
+/// Where a wait on a request stands.
+public enum WaitStatus { Pending, Released }
+
+/// What a workflow waits ON: one row per request, whose run the waiter starts (`Requests.Answer`) and the request
+/// ends when it closes. It holds nothing of its own.
+[Unique(Request)]
+public entity RequestWait {
+  [Required, Immutable] HumanRequest Request;
+  WaitStatus Status = WaitStatus.Pending;
+  /// Somebody is waiting on it: its run has started.
+  bool Held = false;
+
+  security {
+    allow read when IsAuthenticated || IsAnonymous;
+    allow create when AsksPeople;
+    deny create except via PutRequest;
+    deny update;
+    deny delete;
+  }
+}
+
+// ── what a request is made of ───────────────────────────────────────────────────────────────────────────────────────
+
+/// One thing a request may be answered with.
+public class RequestOption {
+  /// What the answer carries (`RequestOutcome.Choice`), and what the person reads on the button.
+  public string Key = "";
+  public string Label = "";
+  /// It says no, or does something that cannot be undone: the form draws it apart from the others.
+  public bool Grave = false;
+  /// Choosing it needs a word of explanation.
+  public bool NeedsComment = false;
+
+  /// An option whose key is its label in lower case with dashes: `RequestOption.Of("Send a replacement")`.
+  public static RequestOption Of(string label, bool grave = false, bool needsComment = false) {
+    return new RequestOption { Key = label.Trim().ToLower().Replace(" ", "-"), Label = label.Trim(), Grave = grave, NeedsComment = needsComment };
+  }
+}
+
+/// What kind of thing one field of a request for information takes.
+public enum FieldKind { Text, LongText, Number, YesNo, Choice, Date }
+
+/// One field of a request for information.
+public class RequestField {
+  /// The member of the answer's class it fills, and what the person reads above it.
+  public string Key = "";
+  public string Label = "";
+  /// A line under the label: what is wanted, in a sentence.
+  public string Help = "";
+  public FieldKind Kind = FieldKind.Text;
+  public bool Required = true;
+  /// What a `Choice` may be.
+  public List<RequestOption> Choices = [];
+}
+
+/// One fact shown beside a request — "Amount", "42.00 EUR".
+public class RequestFact {
+  public string Label = "";
+  public string Value = "";
+  public RequestFact(string label, string value) { Label = label; Value = value; }
+}
+
+/// A record a request is about, or the work that waits for it: what kind of record, which one, what a person calls
+/// it — and, for what an approval is of, the version that was shown.
+public class Subject {
+  public string Type = "";
+  public Guid? Id;
+  public string Label = "";
+  public string Version = "";
+
+  /// `Subject.Of("Order", order.Id, "Order T-1042", version: order.Revision.ToString())`
+  public static Subject Of(string type, Guid id, string label, string version = "") {
+    return new Subject { Type = type, Id = id, Label = label, Version = version };
+  }
+}
+
+/// ⭐ WHAT A REQUEST IS PUT WITH.
+///
+///     new NewRequest {
+///       Kind = RequestKind.Question, To = sana, Title = "Replacement or refund for order T-1042?",
+///       Context = "The parcel is lost. The customer needs it before Friday.",
+///       Options = [RequestOption.Of("Send a replacement"), RequestOption.Of("Refund in full")],
+///       Within = TimeSpan.FromHours(4), Hours = officeHours, RemindAfter = TimeSpan.FromHours(2),
+///     }
+public class NewRequest {
+  public RequestKind Kind = RequestKind.Question;
+  /// The line the person scans in their inbox: the question itself.
+  public string Title = "";
+  /// What they need to know to answer.
+  public string Context = "";
+  /// Facts shown beside it.
+  public List<RequestFact> Facts = [];
+
+  /// The person it is put to. Null: whoever works `Queue` — or somebody outside (`OutsideEmail`).
+  public Principal? To;
+  /// Somebody who may NOT answer it, though they work the queue it waits in — the person whose own request it
+  /// decides (a refund they asked for, put to Finance). Four eyes, said by whoever puts the request.
+  public Principal? NotBy;
+  /// The work queue it waits in, by name. "": the app's (`RequestsSetup.Queue`), else the inbox's default.
+  public string Queue = "";
+  /// Somebody with no account. The request is then answered through its link (`AnswerLinkFor`) and by nobody inside.
+  public string OutsideName = "";
+  public string OutsideEmail = "";
+
+  /// What a question may be answered with. None: it is answered in words. An approval offers its own two.
+  public List<RequestOption> Options = [];
+  /// The fields of a request for information — or leave them out and say the class: `NewRequest.For<Details>()`.
+  public List<RequestField> Fields = [];
+  public string AnswerType = "";
+
+  /// What it is about — with the version shown, for an approval.
+  public Subject? About;
+  /// The work that waits for the answer.
+  public Subject? WaitingWork;
+  /// The process or agent that is asking, as a person reads it. "": whoever is signed in asks for themselves.
+  public string AskedByName = "";
+  public bool AskedByAgent = false;
+
+  /// How urgent the item is in its queue.
+  public WorkPriority Priority = WorkPriority.Normal;
+  /// How long it may wait before it is late, counted in `Hours`; and how long it may wait at all.
+  public TimeSpan? Within;
+  public TimeSpan? ExpireAfter;
+  public Osysharp.ServiceHours.ServiceHours? Hours;
+  /// When to remind, how often after that, and the most times. Null: the app's (`RequestsSetup`).
+  public TimeSpan? RemindAfter;
+  public TimeSpan? RemindEvery;
+  public int? MaxReminders;
+  /// Who it goes to when it is late.
+  public Principal? EscalateTo;
+  /// The request this one is put in place of.
+  public HumanRequest? Replaces;
+
+  /// A request for the fields of `T`: each public member becomes a field — its name in words the label, its `///`
+  /// comment the line under it, its type the kind of field, `T?` not required — and the answer is read back as a `T`.
+  ///
+  ///     var ask = NewRequest.For<SupplierDetails>();
+  ///     ask.To = contact; ask.Title = "Your company's details";
+  public static NewRequest For<T>() {
+    return new NewRequest { Kind = RequestKind.Information, Fields = FieldsOfSchema(Json.SchemaOf<T>()), AnswerType = typeof(T).FullName };
+  }
+}
+
+/// The key every request carries as its kind in the work queue — what a bulk action is told the picked items share.
+public string RequestKindKey(RequestKind kind) {
+  return kind == RequestKind.Approval ? "request.approval" : kind == RequestKind.Information ? "request.information" : "request.question";
+}
+
+// ── fields from a class ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The fields a JSON Schema of a class describes — one per property, in the order declared.
+List<RequestField> FieldsOfSchema(string schemaJson) {
+  List<RequestField> fields = [];
+  var schema = JsonSerializer.Deserialize<Dictionary<string, Json>>(schemaJson);
+  if (!schema.ContainsKey("properties")) {
+    throw new ValidationException("A request for information asks for the fields of a class: `NewRequest.For<Details>()`, where `Details` is a class with public members.");
+  }
+  List<string> required = [];
+  if (schema.ContainsKey("required")) { required = JsonSerializer.Deserialize<List<string>>(schema["required"].ToString()); }
+  var properties = JsonSerializer.Deserialize<Dictionary<string, Json>>(schema["properties"].ToString());
+  foreach (var name in properties.Keys) {
+    var p = JsonSerializer.Deserialize<Dictionary<string, Json>>(properties[name].ToString());
+    var type = p.ContainsKey("type") ? p["type"].ToString() : "";
+    var format = p.ContainsKey("format") ? TextOfJson(p["format"].ToString()) : "";
+    var field = new RequestField { Key = name, Label = FieldWords(name), Required = required.Contains(name) };
+    if (p.ContainsKey("description")) { field.Help = TextOfJson(p["description"].ToString()); }
+    if (p.ContainsKey("enum")) {
+      field.Kind = FieldKind.Choice;
+      foreach (var member in JsonSerializer.Deserialize<List<string>>(p["enum"].ToString())) {
+        field.Choices.Add(new RequestOption { Key = member, Label = FieldWords(member) });
+      }
+    } else if (type.Contains("boolean")) {
+      field.Kind = FieldKind.YesNo;
+      field.Required = false;
+    } else if (type.Contains("integer") || type.Contains("number")) {
+      field.Kind = FieldKind.Number;
+    } else if (format == "date" || format == "date-time") {
+      field.Kind = FieldKind.Date;
+    } else if (type.Contains("string")) {
+      var max = p.ContainsKey("maxLength") ? int.Parse(p["maxLength"].ToString()) : 0;
+      field.Kind = max == 0 || max > 200 ? FieldKind.LongText : FieldKind.Text;
+    } else {
+      throw new ValidationException($"`{name}` cannot be asked for on a form: a field is text, a number, a yes or no, a date or an enum.");
+    }
+    fields.Add(field);
+  }
+  return fields;
+}
+
+/// The text a JSON string holds: `"a \"b\""` → `a "b"`.
+string TextOfJson(string json) {
+  return JsonSerializer.Deserialize<Dictionary<string, string>>("{\"v\":" + json + "}")["v"];
+}
+
+/// A member's name as words: "VatNumber" → "Vat number".
+string FieldWords(string name) {
+  var words = "";
+  foreach (var c in name) {
+    if (char.IsUpper(c) && words != "") { words = words + " " + char.ToLower(c); }
+    else { words = words + c; }
+  }
+  return words;
+}

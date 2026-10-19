@@ -1,0 +1,28 @@
+// Erasing a person from what was asked of them — the one write a privacy request makes to a request.
+namespace Osysharp.HumanRequests;
+
+using Osysharp.Identity;
+
+/// ⭐ ERASE WHO A REQUEST WAS PUT TO, AND WHAT THEY SAID. Their name and address, what they were shown, the facts
+/// beside it, what it was about, and their answer and comment go; when `account` is theirs, so do the request's
+/// references to their account. What stays is that a request was put, what kind of thing it asked, when, and how it
+/// ended — the asker's own record. `HumanRequestErased` is raised for whoever told it elsewhere.
+[Server, Authorize(ErasesRequestRecords)]
+public void EraseFromRequest(HumanRequest request, Guid? account, string why) {
+  if (why.Trim() == "") { throw new ValidationException("Say why it is erased."); }
+  request.OutsideName = "";
+  request.OutsideEmail = "";
+  request.SubjectLabel = request.SubjectLabel == "" ? "" : "somebody who asked to be erased";
+  request.Context = "";
+  request.FactsJson = "[]";
+  request.AnswerJson = null;
+  request.Comment = "";
+  request.AnsweredByName = "";
+  if (account != null) {
+    if (request.To != null && request.To!.Id == account) { request.To = null; }
+    if (request.AnsweredBy != null && request.AnsweredBy!.Id == account) { request.AnsweredBy = null; }
+  }
+  request.ErasedAt = DateTime.UtcNow;
+  request.ErasedWhy = why.Trim();
+  Raise(new HumanRequestErased { Request = request, Why = why.Trim() });
+}

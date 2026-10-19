@@ -1,0 +1,215 @@
+// Osysharp.HumanRequests — putting a request to somebody and getting the answer back: a question with options, a
+// request for information whose fields are a class's members, a request to whoever works the queue, the item it is in
+// the inbox, and a process that waits a month for a person.
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+using Osysharp.HumanRequests;
+using Osysharp.Workflow;
+using Boatyard;
+
+// ── a question ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
+[Test(Yard)]
+void a_question_put_to_one_person_is_in_their_inbox_and_their_answer_comes_back() {
+  Guid id = Guid.Empty;
+  runas (Joel) {
+    var request = AskWhichSlip(Tern(), PersonNamed("Edvin"));
+    Workflow.Settle(request);
+    id = request.Id;
+    // It records who asked, read from who was signed in; what it is about; and what it may be answered with.
+    Assert.Equal(AskerKind.Person, request.AskedByKind);
+    Assert.Equal("Joel Aro", request.AskedBy!.DisplayName);
+    Assert.Equal("Boat", request.SubjectType);
+    Assert.Equal("Tern", request.SubjectLabel);
+    Assert.Equal(RequestStatus.Open, request.Status);
+    // It is an ordinary item of the yard's queue, and it is Edvin's as it arrives.
+    Assert.Equal("Yard", request.Queue!.Name);
+    Assert.Equal("Edvin Strand", request.Assignee!.DisplayName);
+    Assert.Equal("request.question", request.Kind);
+  }
+  runas (Edvin) {
+    Assert.Equal(["Which slip for Tern?"], Requests.Mine().Select(r => r.Title).ToList());
+    var result = AnswerRequest(TheRequest(id), RequestAnswer.Choose("north-slip"));
+    Assert.True(result.Applied);
+    Assert.Equal("Thank you. Your answer has been passed on.", result.Said);
+    Workflow.Settle(TheRequest(id));
+    Assert.Equal(0, Requests.Mine().Count);
+  }
+  Background.Settle();
+  runas (Joel) {
+    var outcome = OutcomeOf(TheRequest(id));
+    Assert.True(outcome.Answered);
+    Assert.Equal("north-slip", outcome.Choice);
+    Assert.Equal("Edvin Strand", outcome.ByName);
+    Assert.Equal(Assurance.SignedIn, outcome.With);
+    // The inbox's item is done with it.
+    Assert.Equal(Handling.Closed, TheRequest(id).Handling);
+    Assert.Equal(1, Heard.Count(h => h.What == "answered" && h.About == "Which slip for Tern? → north-slip"));
+  }
+}
+
+[Test(Yard)]
+void an_answer_that_was_not_offered_or_lacks_its_reason_is_refused_in_words() {
+  Guid id = Guid.Empty;
+  runas (Joel) { id = AskWhichSlip(Tern(), PersonNamed("Edvin")).Id; }
+  runas (Edvin) {
+    var none = Assert.Throws<ValidationException>(() => AnswerRequest(TheRequest(id), RequestAnswer.Choose("dry-dock")));
+    Assert.Equal("Choose one of: North slip, South slip, Keep her afloat.", none.Message);
+    var bare = Assert.Throws<ValidationException>(() => AnswerRequest(TheRequest(id), RequestAnswer.Choose("keep-her-afloat")));
+    Assert.Equal("“Keep her afloat” needs a word of explanation.", bare.Message);
+    Assert.Equal(RequestStatus.Open, TheRequest(id).Status);
+    Assert.True(AnswerRequest(TheRequest(id), RequestAnswer.Choose("keep-her-afloat", "The north slip's cradle is out for welding.")).Applied);
+  }
+  runas (Joel) { Assert.Equal("The north slip's cradle is out for welding.", OutcomeOf(TheRequest(id)).Comment); }
+}
+
+// ── put to nobody by name ───────────────────────────────────────────────────────────────────────────────────────────
+
+[Test(Yard)]
+void a_request_put_to_the_queue_is_answered_by_whoever_works_it_once() {
+  Guid id = Guid.Empty;
+  runas (Joel) {
+    var request = AskTheYard("Who has the key to the paint store?");
+    Workflow.Settle(request);
+    id = request.Id;
+    Assert.Null(request.Assignee);
+  }
+  runas (Signe) {
+    Assert.True(AnswerRequest(TheRequest(id), RequestAnswer.Say("It hangs in the office, behind the door.")).Applied);
+  }
+  // Edvin answers a moment later: the request already has its answer, so his is kept and changes nothing.
+  runas (Edvin) {
+    var late = AnswerRequest(TheRequest(id), RequestAnswer.Say("I have it."));
+    Assert.True(late.Kept);
+    Assert.Equal(LateWhy.AlreadyAnswered, late.Why);
+  }
+  runas (Joel) {
+    var outcome = OutcomeOf(TheRequest(id));
+    Assert.Equal("It hangs in the office, behind the door.", outcome.Comment);
+    Assert.Equal("Signe Holm", outcome.ByName);
+    var kept = LateAnswer.Single();
+    Assert.Equal("I have it.", kept.Comment);
+    Assert.Equal("Edvin Strand", kept.By!.DisplayName);
+  }
+}
+
+// ── information: the fields of a class ──────────────────────────────────────────────────────────────────────────────
+
+[Test(Yard)]
+void a_request_for_information_asks_for_the_members_of_a_class_and_hands_them_back_typed() {
+  Guid id = Guid.Empty;
+  runas (Edvin) {
+    var request = AskAHandForPapers(Tern(), PersonNamed("Joel"));
+    id = request.Id;
+    // One field per member: its name in words, its comment, its kind — and `string?` is not required.
+    var fields = JsonSerializer.Deserialize<List<RequestField>>(request.FieldsJson);
+    Assert.Equal(["Registration", "Length metres", "Insured", "Notes"], fields.Select(f => f.Label).ToList());
+    Assert.Equal([FieldKind.Text, FieldKind.Number, FieldKind.YesNo, FieldKind.LongText], fields.Select(f => f.Kind).ToList());
+    Assert.Equal("The registration number painted on the hull.", fields[0].Help);
+    Assert.Equal([true, true, false, false], fields.Select(f => f.Required).ToList());
+  }
+  runas (Joel) {
+    var missing = Assert.Throws<ValidationException>(() => AnswerRequest(TheRequest(id), new RequestAnswer { Values = new Dictionary<string, string> { ["Registration"] = "FIN-A-40821" } }));
+    Assert.Equal("“Length metres” is needed.", missing.Message);
+    var wrong = Assert.Throws<ValidationException>(() => AnswerRequest(TheRequest(id), new RequestAnswer { Values = new Dictionary<string, string> { ["Registration"] = "FIN-A-40821", ["LengthMetres"] = "nine" } }));
+    Assert.Equal("“Length metres” is a number.", wrong.Message);
+    AnswerRequest(TheRequest(id), RequestAnswer.Of(new BoatPapers { Registration = "FIN-A-40821", LengthMetres = 9.4m, Insured = true }));
+  }
+  Background.Settle();
+  runas (Edvin) {
+    var papers = OutcomeOf(TheRequest(id)).As<BoatPapers>();
+    Assert.Equal("FIN-A-40821", papers.Registration);
+    Assert.Equal(9.4m, papers.LengthMetres);
+    Assert.True(papers.Insured);
+    Assert.Null(papers.Notes);
+    // What heard the answer wrote it onto the boat.
+    Assert.Equal("FIN-A-40821", Tern().Registration);
+    Assert.Equal(9.4m, Tern().LengthMetres);
+  }
+}
+
+// ── a process waits for a person ────────────────────────────────────────────────────────────────────────────────────
+
+/// A quote's process asks the manager and parks. Thirty days pass — nothing runs, nothing is asked of anybody — and
+/// when she answers, the process goes on from where it stood, with her answer.
+[Test(Yard)]
+void a_person_answers_after_thirty_days_and_the_work_continues() {
+  TestClock.Set(MondayMorning());
+  Guid quote = Guid.Empty;
+  runas (Edvin) {
+    var q = KeelBolts();
+    quote = q.Id;
+    Workflow.Run(q);
+    Workflow.Settle(q);
+    Assert.Equal(QuoteStage.WaitingForApproval, q.Stage);
+  }
+  TestClock.Advance(TimeSpan.FromDays(30));
+  Background.Settle();
+  runas (Marit) { Workflow.Settle(Requests.Mine().Single()); }
+  runas (Edvin) {
+    var q = Quote.Single(x => x.Id == quote);
+    Workflow.Settle(q);
+    Assert.Equal(QuoteStage.WaitingForApproval, q.Stage);
+    Assert.False(q.Sent);
+  }
+  runas (Marit) {
+    var mine = Requests.Mine().Single();
+    Assert.Equal("Approve the quote for Tern?", mine.Title);
+    // It is long past its date, and still hers to answer.
+    Assert.NotNull(mine.OverdueAt);
+    Assert.True(AnswerRequest(mine, RequestAnswer.Approve()).Applied);
+    Workflow.Settle(mine);
+  }
+  runas (Edvin) {
+    var q = Quote.Single(x => x.Id == quote);
+    Workflow.Settle(q);
+    Assert.Equal(QuoteStage.Approved, q.Stage);
+    Assert.True(q.Sent);
+    Assert.Equal("Approved by Marit Lund.", q.Note);
+  }
+}
+
+[Test(Yard)]
+void a_process_hears_a_no_with_its_reason_and_a_request_that_was_called_off() {
+  Guid first = Guid.Empty;
+  Guid second = Guid.Empty;
+  runas (Edvin) {
+    var q = KeelBolts();
+    first = q.Id;
+    Workflow.Run(q);
+    Workflow.Settle(q);
+    var other = new Quote { Boat = Boat.Single(b => b.Name == "Sula"), Work = "Antifoul the hull", Amount = 2100m };
+    second = other.Id;
+    Workflow.Run(other);
+    Workflow.Settle(other);
+  }
+  runas (Marit) {
+    var keel = Requests.Mine().Single(r => r.SubjectLabel == "Replace the keel bolts on Tern");
+    AnswerRequest(keel, RequestAnswer.Reject("Quote the bronze bolts, not the stainless."));
+    Workflow.Settle(keel);
+  }
+  runas (Henrik) {
+    var hull = HumanRequest.Single(r => r.SubjectLabel == "Antifoul the hull on Sula");
+    CancelRequest(hull, "The owner has taken the boat elsewhere.");
+    Workflow.Settle(hull);
+  }
+  runas (Edvin) {
+    var a = Quote.Single(x => x.Id == first);
+    var b = Quote.Single(x => x.Id == second);
+    Workflow.Settle(a);
+    Workflow.Settle(b);
+    Assert.Equal(QuoteStage.Declined, a.Stage);
+    Assert.Equal("Declined: Quote the bronze bolts, not the stainless.", a.Note);
+    Assert.Equal(QuoteStage.Lapsed, b.Stage);
+    Assert.Equal("No answer: The owner has taken the boat elsewhere.", b.Note);
+  }
+}
+
+[Test(Yard)]
+[runas(Joel)]
+void outside_a_process_waiting_is_refused_and_says_what_to_do_instead() {
+  var request = AskWhichSlip(Tern(), PersonNamed("Edvin"));
+  var refused = Assert.Throws<RequestRefused>(() => await Requests.Answer(request));
+  Assert.Contains("only a workflow can wait", refused.Message);
+  Assert.Contains("[On] void Go(HumanRequestAnswered e)", refused.Message);
+}
