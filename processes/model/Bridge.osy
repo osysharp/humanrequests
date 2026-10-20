@@ -1,0 +1,79 @@
+// A request put from a workflow's run is told on that run: who was asked, what became of it, and who answered.
+namespace Osysharp.HumanRequests.Processes;
+
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+using Osysharp.HumanRequests;
+using Osysharp.Processes;
+using Osysharp.Ui;
+
+/// What a line of a run that is about a request says its subject is — `ProcessMoment.SubjectKind`.
+public string RequestSubject() { return "HumanRequest"; }
+
+/// Who a request was put to, as a person reads it: their name, the name somebody outside gave with "by a link",
+/// or the queue whose people may answer it.
+public string AskedOf(HumanRequest r) {
+  if (r.To != null) { return r.To!.DisplayName != "" ? r.To!.DisplayName : r.To!.Email; }
+  if (r.OutsideName != "") { return r.OutsideName + ", by a link"; }
+  if (r.OutsideEmail != "") { return "somebody outside, by a link"; }
+  return r.Queue == null ? "whoever works the inbox" : "whoever works the " + r.Queue!.Name + " queue";
+}
+
+string NamedOrSomebody(Principal? p) {
+  if (p == null) { return "somebody"; }
+  return p!.DisplayName != "" ? p!.DisplayName : p!.Email;
+}
+
+/// One line about a request, on the run that put it. A request put outside a run is no step of a process, and says
+/// nothing here — from a page; and what an agent proposes or asks while it works for a run, which is put when its
+/// work has stopped to wait, not from the run's own body: the agent's work tells that itself.
+void TellTheRun(HumanRequest r, string said, ProcessNoteTone tone) {
+  if (r.Run == null) { return; }
+  NoteOnProcessRun(new ProcessLine {
+    Run = r.Run!, Workflow = r.RunWorkflow, Item = r.RunItem, Starter = r.RunStarter, State = r.RunState,
+    Said = said, Tone = tone, SubjectKind = RequestSubject(), Subject = r.Id,
+  });
+}
+
+[On] void Asked(HumanRequestPut e) {
+  TellTheRun(e.Request, $"Asked {AskedOf(e.Request)}: “{e.Request.Title}”", ProcessNoteTone.Waiting);
+}
+
+[On] void ItsDatePassed(HumanRequestOverdue e) {
+  var on = e.EscalatedTo == null ? " It still waits." : $" It went on to {NamedOrSomebody(e.EscalatedTo)}.";
+  TellTheRun(e.Request, $"“{e.Request.Title}” was not answered in time." + on, ProcessNoteTone.Problem);
+}
+
+[On] void Answered(HumanRequestAnswered e) {
+  var outcome = OutcomeOf(e.Request);
+  var who = outcome.ByName == "" ? "Somebody" : outcome.ByName;
+  var after = outcome.At == null ? "" : " after " + Lasting(outcome.At! - e.Request.ArrivedAt);
+  var said = outcome.Approved ? $"{who} approved “{e.Request.Title}”{after}."
+           : outcome.Rejected ? $"{who} did not approve “{e.Request.Title}”{after}" + (outcome.Comment == "" ? "." : ": " + outcome.Comment)
+           : $"{who} answered “{e.Request.Title}”{after}.";
+  TellTheRun(e.Request, said, ProcessNoteTone.Done);
+}
+
+/// Who the request was put to and what they said were erased: its lines on the run say that a request was put and
+/// what became of it, and nothing of whom.
+[On] void TellItWithoutThem(HumanRequestErased e) {
+  if (e.Request.Run == null) { return; }
+  RetellProcessLines(RequestSubject(), e.Request.Id, "Somebody was asked something here who has since asked to be erased.");
+}
+
+[On] void NobodyAnswered(HumanRequestExpired e) {
+  TellTheRun(e.Request, $"Nobody answered “{e.Request.Title}” in the time it could wait.", ProcessNoteTone.Problem);
+}
+
+[On] void CalledOff(HumanRequestCancelled e) {
+  TellTheRun(e.Request, $"“{e.Request.Title}” was called off" + (e.Why == "" ? "." : ": " + e.Why), ProcessNoteTone.Plain);
+}
+
+/// A line of a run that is about a request opens the request in place — the question, what is known, and what came
+/// back — as whoever is looking may read it.
+[Contribution("Request")]
+component RequestOpened(string kind, Guid subject) : ProcessMomentPanel {
+  render {
+    if (kind == RequestSubject()) { RequestSheet(subject); }
+  }
+}

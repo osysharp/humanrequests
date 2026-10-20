@@ -1,0 +1,574 @@
+// ⭐ ONE HIRE, WALKED FROM END TO END over four weeks in March — the owner's "recruiting" case.
+//
+//   Mon  3 Mar  Vera, a director, asks for a senior implementation consultant. The hiring coordinator reads her
+//               request and asks her what it leaves open.
+//   Tue  4 Mar  She answers. The coordinator writes the requirements down; applications are taken.
+//   Wed 12 Mar  Four people have applied. Noor, the talent partner, closes the list. The coordinator hands each
+//               application to the reader, all at once; the reader runs out of its allowance on the longest.
+//   Thu 13 Mar  Noor reads that one by hand. Three candidates are asked, each through a link, when they could meet.
+//   Fri 14 Mar  Ilse answers.   Sat 15 Mar  Petra answers.
+//   Mon 17 Mar  Tomas rings: he has taken another job. What was asked of him is called off — and he asks for what
+//               the firm holds about him to be erased. Emil and Signe are asked for their feedback.
+//   Tue 18 Mar  Ruth, who answers privacy requests, erases him. The hire goes on: Emil answers on Petra.
+//   Wed 19 Mar  Signe is away; her request's date passes and it goes on to Emil.
+//   Thu 20 Mar  Emil, who sat in on that interview too, answers on Ilse.
+//               The coordinator compares them and proposes the offer: Petra, at the top of the range. Vera says no —
+//               Petra cannot start before August. It proposes Ilse; she says yes, and the offer is made as her.
+//   Mon 24 Mar  Ilse accepts through her link. The last thing "done" means is met by her own answer.
+//
+// Then it is read back: by the manager, by the talent partner with what it cost, by an interviewer, by the
+// people-data officer, and through a candidate's link.
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+using Osysharp.HumanRequests;
+using Osysharp.Assignments;
+using Osysharp.Assignments.WorkQueues;
+using Osysharp.Assignments.Agents;
+using Osysharp.WorkRepositories;
+using Osysharp.WorkRepositories.Agents;
+using Osysharp.Llm;
+using Osysharp.Agents;
+using Osysharp.Agents.Testing;
+using Osysharp.Agents.HumanRequests;
+using Osysharp.Agents.Inspector;
+using Osysharp.Agents.Processes;
+using Osysharp.Processes;
+using Osysharp.Workflow;
+using Osysharp.Privacy;
+using Osysharp.HumanRequests.Processes;
+using Staffing;
+
+string HireArg(Hire h) { return "{\"hire\":\"" + h.Id.ToString() + "\"}"; }
+string CandidateArg(Applicant c) { return "{\"candidate\":\"" + c.Id.ToString() + "\"}"; }
+string AssessArgs(Applicant c, bool meets, string why) {
+  return "{\"candidate\":\"" + c.Id.ToString() + "\",\"meets\":" + (meets ? "true" : "false") + ",\"why\":\"" + why + "\"}";
+}
+string OfferArgs(Applicant c, int salary) { return "{\"candidate\":\"" + c.Id.ToString() + "\",\"salary\":" + salary.ToString() + "}"; }
+
+/// One application read: the reader reads it, records how it stands, and hands that back.
+AgentScript Reads(Applicant c, bool meets, string why, int input = 100, int output = 20) {
+  return AgentScript.Of(
+    Says.Tool(Actions.Of(ReadApplication), CandidateArg(c), input, output),
+    Says.Tool(Actions.Of(RecordAssessment), AssessArgs(c, meets, why)),
+    Says.HandBack(new Assessment { Meets = meets, Why = why }));
+}
+
+/// ⭐ WHAT EACH MODEL SAYS, from the hire as it stands when a model is asked.
+AgentCast TheFirmsAgents(Hire h) {
+  var cast = AgentCast.Of()
+    .PlaysAbout<HiringCoordinator>("Clarify the role", AgentScript.Of(
+      Says.AskPerson("Must they have led a rollout for a public-sector client, and by when should they start?",
+                     "Your request says somebody who can lead a client rollout alone, and soon."),
+      Says.Tool(Actions.Of(WriteRequirements), "{\"hire\":\"" + h.Id.ToString() + "\",\"mustHave\":\"Has led a client rollout alone, for a public-sector client.\",\"startBy\":\"1 June\"}"),
+      Says.HandBack(new RoleProfile { MustHave = "Has led a client rollout alone, for a public-sector client.", StartBy = "1 June" })));
+  var applied = Applicant.Where(c => c.Hire == h).OrderBy(c => c.Name).ToList();
+  if (applied.Count == 4) {
+    // By name — and the fourth is whoever is left: once he is erased, his row no longer says who he was.
+    var ilse = applied.Single(c => c.Name == "Ilse Varga");
+    var jonah = applied.Single(c => c.Name == "Jonah Wicks");
+    var petra = applied.Single(c => c.Name == "Petra Olin");
+    var tomas = applied.Single(c => c.Name != "Ilse Varga" && c.Name != "Jonah Wicks" && c.Name != "Petra Olin");
+    cast = cast
+      .PlaysAbout<HiringCoordinator>("Have every application read", AgentScript.Of(
+        Says.Together(
+          Says.HandTo<ApplicationReader>(new AssessApplication(), Says.Row(ilse.Id), call: "a"),
+          Says.HandTo<ApplicationReader>(new AssessApplication(), Says.Row(jonah.Id), call: "b"),
+          Says.HandTo<ApplicationReader>(new AssessApplication(), Says.Row(petra.Id), call: "c"),
+          Says.HandTo<ApplicationReader>(new AssessApplication(), Says.Row(tomas.Id), call: "d")),
+        Says.HandBack(new Shortlist { Read = 3, Meet = 2, NotRead = ["Petra Olin"] })))
+      .PlaysAbout<ApplicationReader>("The application of Ilse Varga", Reads(ilse, true, "Led the rollout of a case system for two county councils, alone on site."))
+      .PlaysAbout<ApplicationReader>("The application of Jonah Wicks", Reads(jonah, false, "Support and training only; has not led a rollout."))
+      // Eleven pages: one answer of 1000 tokens in and 600 out costs 4000 of the reader's 6000.
+      .PlaysAbout<ApplicationReader>("The application of Petra Olin", Reads(petra, true, "Not reached.", 1000, 600))
+      .PlaysAbout<ApplicationReader>("The application of Tomas Reyes", Reads(tomas, true, "Led a payroll rollout for a municipal housing company."));
+    cast = cast.PlaysAbout<HiringCoordinator>("Compare the candidates", AgentScript.Of(
+      Says.Tool(Actions.Of(CandidatesInTheRunning), HireArg(h)),
+      Says.Tool("Petra Olin has led the larger rollouts, and both interviewers would put her in front of a client. The top of the range.", Actions.Of(OfferThePlace), OfferArgs(petra, 70000)),
+      Says.Tool("Ilse Varga can start in April, and has led a rollout alone for two councils.", Actions.Of(OfferThePlace), OfferArgs(ilse, 66000)),
+      Says.HandBack(new Comparison { Recommended = "Ilse Varga", Why = "Both meet what the role needs. Ilse Varga can start in April; Petra Olin not before August, and the role is needed by 1 June." })));
+  }
+  return cast;
+}
+
+void TheAgentsAnswer() {
+  ScriptedAnswer.Stub((model, request) => TheFirmsAgents(Hire.Single()).Answer(model, request));
+}
+
+/// Let whatever waits look again: an answered request is carried to what waited for it, the agent's piece goes on,
+/// and the hire's process follows.
+void LetItGoOn(Guid hire) {
+  for (var i = 0; i < 4; i++) {
+    Background.Settle();
+    runas (Noor) {
+      foreach (var wait in AgentWait.Where(w => w.Status == AgentWaitStatus.Waiting).ToList()) { Workflow.Settle(wait); }
+      foreach (var wait in AgentWorkWait.ToList()) { Workflow.Settle(wait); }
+      Workflow.Settle(Hire.Single(h => h.Id == hire));
+    }
+  }
+}
+
+/// The open request whose title starts with `title`, among those put to whoever is signed in.
+HumanRequest Mine(string title) { return Requests.Mine().Single(r => r.Title.StartsWith(title)); }
+
+/// The link that was mailed to an address, for the request whose title starts with `title`.
+string LinkMailedTo(string email, string title) {
+  var link = "";
+  runas (Noor) { link = Heard.Single(h => h.What == "mailed" && h.To == email && h.Title.StartsWith(title)).About; }
+  return link;
+}
+
+HireStage StageOf(Guid hire) { return Hire.Single(h => h.Id == hire).Stage; }
+
+/// ⭐ THE FIRST TWO WEEKS: from Vera's request to three candidates asked when they could meet.
+Guid TheHireUntilTheInterviews() {
+  TestClock.Set(new DateTime(2031, 3, 3, 8, 0, 0, DateTimeKind.Utc));
+  Guid hire = Guid.Empty;
+  TheAgentsAnswer();
+  runas (Vera) {
+    var h = AskForAHire("Senior implementation consultant", 62000, 70000, "Somebody who can lead a client rollout alone. Soon.", Noor, [Emil, Signe]);
+    Workflow.Settle(h);
+    hire = h.Id;
+  }
+  LetItGoOn(hire);
+
+  // Tue 4 Mar: Vera answers what the coordinator asked.
+  TestClock.Advance(TimeSpan.FromDays(1));
+  runas (Vera) { AnswerRequest(Requests.Mine().Single(), RequestAnswer.Say("Yes, public sector. They should start by 1 June.")); }
+  LetItGoOn(hire);
+
+  // 5–11 Mar: four applications. Wed 12 Mar: Noor closes the list.
+  TestClock.Advance(TimeSpan.FromDays(8));
+  runas (Noor) {
+    var h = TheHire(hire);
+    TakeApplication(h, "Ilse Varga", "ilse@varga.example", "Six years at a systems house. Led the rollout of a case system for two county councils, alone on site. Could start in April.");
+    TakeApplication(h, "Jonah Wicks", "jonah@wicks.example", "Three years in customer support and end-user training.");
+    TakeApplication(h, "Petra Olin", "petra@olin.example", "Eleven pages: nine rollouts for regional health authorities, the last three as the only consultant on site. Notice period until August.");
+    TakeApplication(h, "Tomas Reyes", "tomas@reyes.example", "Led a payroll rollout for a municipal housing company. Available at once.");
+    UnitOfWork.Commit();
+    CloseTheList(h);
+  }
+  LetItGoOn(hire);
+
+  // Thu 13 Mar: Noor reads the one the agents could not.
+  TestClock.Advance(TimeSpan.FromDays(1));
+  runas (Noor) { ReadByHandAs(Named("Petra Olin"), true, "Nine rollouts for regional health authorities, the last three alone on site."); }
+  LetItGoOn(hire);
+  return hire;
+}
+
+/// ⭐ …AND THE TWO WEEKS AFTER: two answer, one withdraws and is erased, the interviewers answer — one for the other —
+/// the offer is refused, then approved, and accepted.
+void TheHireFromTheInterviews(Guid hire) {
+  TheHireToTheProposal(hire);
+  TheHireFromTheProposal(hire);
+}
+
+/// From the candidates' answers to the Thursday the coordinator proposes its first offer.
+void TheHireToTheProposal(Guid hire) {
+  // Fri 14 Mar: Ilse answers through her link. Sat 15 Mar: Petra does.
+  TestClock.Advance(TimeSpan.FromDays(1));
+  AnswerByLink(AnswerLink.From(LinkMailedTo("ilse@varga.example", "When could you")), new RequestAnswer { Values = new Dictionary<string, string> { ["CouldMeet"] = "Tuesday or Wednesday afternoon", ["CanStart"] = "April" } }, "Ilse Varga");
+  LetItGoOn(hire);
+  TestClock.Advance(TimeSpan.FromDays(1));
+  AnswerByLink(AnswerLink.From(LinkMailedTo("petra@olin.example", "When could you")), new RequestAnswer { Values = new Dictionary<string, string> { ["CouldMeet"] = "Any morning next week", ["CanStart"] = "August" } }, "Petra Olin");
+  LetItGoOn(hire);
+
+  // Mon 17 Mar: Tomas has taken another job. Tue 18 Mar: he is erased.
+  TestClock.Advance(TimeSpan.FromDays(2));
+  runas (Noor) { CandidateWithdraws(Named("Tomas Reyes")); }
+  LetItGoOn(hire);
+  TestClock.Advance(TimeSpan.FromDays(1));
+  runas (Ruth) {
+    var r = FileRequest(Osysharp.Privacy.RequestKind.Erasure, null, "tomas@reyes.example", IdentityCheck.KnownDetails, "He wrote from the address on his application.");
+    ApproveRequest(r);
+  }
+  LetItGoOn(hire);
+  // The same day Emil, who met Petra, answers.
+  runas (Emil) {
+    AnswerRequest(Mine("Your feedback on Petra Olin"), RequestAnswer.Of(new InterviewFeedback { ClientReady = true, Saw = "Calm, exact, and has done this many times." }));
+  }
+  LetItGoOn(hire);
+
+  // Wed 19 Mar: Signe has not answered; her request goes on to Emil. Thu 20 Mar: he answers that one too.
+  TestClock.Advance(TimeSpan.FromDays(1));
+  LetItGoOn(hire);
+  TestClock.Advance(TimeSpan.FromDays(1));
+  runas (Emil) {
+    AnswerRequest(Mine("Your feedback on Ilse Varga"), RequestAnswer.Of(new InterviewFeedback { ClientReady = true, Saw = "Clear with a client, and honest about what she has not done." }));
+  }
+  LetItGoOn(hire);
+}
+
+/// From the first offer proposed to the candidate's yes.
+void TheHireFromTheProposal(Guid hire) {
+  // The coordinator compares; Vera says no to the first offer and yes to the second.
+  runas (Vera) { AnswerRequest(Mine("Hiring"), RequestAnswer.Reject("Petra cannot start before August. We need somebody by 1 June.")); }
+  LetItGoOn(hire);
+  runas (Vera) { AnswerRequest(Mine("Hiring"), RequestAnswer.Approve()); }
+  LetItGoOn(hire);
+
+  // Mon 24 Mar: Ilse accepts.
+  TestClock.Advance(TimeSpan.FromDays(4));
+  AnswerByLink(AnswerLink.From(LinkMailedTo("ilse@varga.example", "Our offer")), RequestAnswer.Approve(), "Ilse Varga");
+  LetItGoOn(hire);
+}
+
+/// Everything the hire's repository, its activity, the agents' receipts and the firm's own rows say — as the talent
+/// partner, who reads all of it, reads it.
+string EverythingSaidOf(Guid hire) {
+  var all = "";
+  runas (Noor) {
+    var h = TheHire(hire);
+    foreach (var i in RepositoryItem.ToList()) { all = all + i.Title + "\n"; }
+    foreach (var v in RepositoryItemVersion.ToList()) { all = all + v.Content + "|" + v.Note + "|" + v.From + "\n"; }
+    foreach (var l in ActivityOf(h.Job, 500)) { all = all + l.Said + "\n"; }
+    foreach (var t in AgentTask.ToList()) { all = all + t.About + "|" + t.Outcome + "|" + (t.Result ?? "") + "\n"; }
+    foreach (var a in Applicant.ToList()) { all = all + a.Name + "|" + a.Email + "|" + a.AssessedWhy + "|" + a.Availability + "\n"; }
+  }
+  return all;
+}
+
+// ── the case ────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+[Test(Firm)]
+void a_hire_is_carried_from_the_managers_request_to_an_accepted_offer() {
+  TestClock.Set(new DateTime(2031, 3, 3, 8, 0, 0, DateTimeKind.Utc));
+  Guid hire = Guid.Empty;
+
+  // ── Mon 3 Mar. Vera asks; the coordinator asks her what her request leaves open. ──
+  TheAgentsAnswer();
+  runas (Vera) {
+    var h = AskForAHire("Senior implementation consultant", 62000, 70000, "Somebody who can lead a client rollout alone. Soon.", Noor, [Emil, Signe]);
+    Workflow.Settle(h);
+    hire = h.Id;
+  }
+  LetItGoOn(hire);
+  runas (Vera) {
+    Assert.Equal(HireStage.Clarifying, StageOf(hire));
+    var asked = Requests.Mine().Single();
+    Assert.Equal("Must they have led a rollout for a public-sector client, and by when should they start?", asked.Title);
+    Assert.Equal(AskerKind.Agent, asked.AskedByKind);
+    Assert.Equal("Your request says somebody who can lead a client rollout alone, and soon.", asked.Context);
+  }
+
+  // ── Tue 4 Mar. She answers; the requirements are written down, and the first thing "done" means is met by them. ──
+  TestClock.Advance(TimeSpan.FromDays(1));
+  runas (Vera) { AnswerRequest(Requests.Mine().Single(), RequestAnswer.Say("Yes, public sector. They should start by 1 June.")); }
+  LetItGoOn(hire);
+  runas (Noor) {
+    var h = TheHire(hire);
+    Assert.Equal(HireStage.Collecting, h.Stage);
+    Assert.Equal("Has led a client rollout alone, for a public-sector client.", h.MustHave);
+    Assert.Equal("1 June", h.StartBy);
+    Assert.Equal(CriterionState.Met, CriterionOf(h.Job, "role").State);
+    Assert.Equal(ItemOf(h.Job, "requirements")!.Id, CriterionOf(h.Job, "role").Evidence);
+  }
+
+  // ── Wed 12 Mar. Four applications; Noor closes the list. Each is handed to the reader, all at once. ──
+  TestClock.Advance(TimeSpan.FromDays(8));
+  runas (Noor) {
+    var h = TheHire(hire);
+    TakeApplication(h, "Ilse Varga", "ilse@varga.example", "Six years at a systems house. Led the rollout of a case system for two county councils, alone on site. Could start in April.");
+    TakeApplication(h, "Jonah Wicks", "jonah@wicks.example", "Three years in customer support and end-user training.");
+    TakeApplication(h, "Petra Olin", "petra@olin.example", "Eleven pages: nine rollouts for regional health authorities, the last three as the only consultant on site. Notice period until August.");
+    TakeApplication(h, "Tomas Reyes", "tomas@reyes.example", "Led a payroll rollout for a municipal housing company. Available at once.");
+    UnitOfWork.Commit();
+    CloseTheList(h);
+  }
+  LetItGoOn(hire);
+  runas (Noor) {
+    // Three were read. The reader ran out of its allowance on the longest — and an application no agent read is
+    // not an application nobody reads: the process hands it to a person.
+    Assert.Equal(HireStage.ByHand, StageOf(hire));
+    var top = AgentTask.Single(t => t.RunItem == hire && t.RunState == "Screening" && t.Parent == null);
+    var tree = Trajectory.Tree(top.Id);
+    Assert.Equal(5, tree.Count);
+    Assert.Equal(3, tree.Count(l => l.EndsWith("Assess application: Done")));
+    Assert.Equal(1, tree.Count(l => l.EndsWith("Assess application: Stopped")));
+    var stopped = AgentTask.Single(t => t.Status == AgentTaskStatus.Stopped);
+    Assert.Equal(6000, stopped.LimitMicros);
+    Assert.Equal(4000, stopped.SpentMicros);
+    Assert.StartsWith("Its money ran out:", stopped.Outcome);
+    Assert.True(Named("Ilse Varga").Meets);
+    Assert.False(Named("Jonah Wicks").Meets);
+    Assert.False(Named("Petra Olin").Assessed);
+    // What an agent hands back is not filed by itself here: the three findings are the three assessments.
+    Assert.Equal(3, ItemsOf(TheHire(hire).Job, ItemKind.Finding).Count);
+  }
+
+  // ── Thu 13 Mar. Noor reads the one by hand. Three candidates are asked, each through a link of their own. ──
+  TestClock.Advance(TimeSpan.FromDays(1));
+  runas (Noor) { ReadByHandAs(Named("Petra Olin"), true, "Nine rollouts for regional health authorities, the last three alone on site."); }
+  LetItGoOn(hire);
+  runas (Noor) {
+    Assert.Equal(HireStage.Interviewing, StageOf(hire));
+    Assert.Equal(CandidateStanding.Declined, Named("Jonah Wicks").Standing);
+    Assert.Equal(["ilse@varga.example", "petra@olin.example", "tomas@reyes.example"], Heard.Where(x => x.What == "mailed").ToList().Select(x => x.To).OrderBy(x => x).ToList());
+    Assert.Equal("Read by hand by Noor Haddad", CurrentOf(ItemOf(TheHire(hire).Job, "assessment-" + Named("Petra Olin").Id.ToString())!).From);
+  }
+
+  // ── Fri 14 Mar, Sat 15 Mar. Two answer. Nobody is asked for feedback until all three have. ──
+  TestClock.Advance(TimeSpan.FromDays(1));
+  AnswerByLink(AnswerLink.From(LinkMailedTo("ilse@varga.example", "When could you")), new RequestAnswer { Values = new Dictionary<string, string> { ["CouldMeet"] = "Tuesday or Wednesday afternoon", ["CanStart"] = "April" } }, "Ilse Varga");
+  LetItGoOn(hire);
+  TestClock.Advance(TimeSpan.FromDays(1));
+  AnswerByLink(AnswerLink.From(LinkMailedTo("petra@olin.example", "When could you")), new RequestAnswer { Values = new Dictionary<string, string> { ["CouldMeet"] = "Any morning next week", ["CanStart"] = "August" } }, "Petra Olin");
+  LetItGoOn(hire);
+  runas (Noor) {
+    Assert.Equal("April", Named("Ilse Varga").CanStart);
+    Assert.Equal(0, HumanRequest.Count(r => r.Title.StartsWith("Your feedback")));
+  }
+
+  // ── Mon 17 Mar. Tomas has taken another job: what was asked of him is called off, and the hire stops waiting. ──
+  TestClock.Advance(TimeSpan.FromDays(2));
+  runas (Noor) { CandidateWithdraws(Named("Tomas Reyes")); }
+  LetItGoOn(hire);
+  runas (Noor) {
+    Assert.Equal(RequestStatus.Cancelled, HumanRequest.Single(r => r.OutsideEmail == "tomas@reyes.example").Status);
+    Assert.Equal(2, HumanRequest.Count(r => r.Title.StartsWith("Your feedback") && r.Status == RequestStatus.Open));
+  }
+  Assert.Contains("Tomas Reyes", EverythingSaidOf(hire));
+  Assert.Contains("payroll rollout", EverythingSaidOf(hire));
+
+  // ── Tue 18 Mar. He asks to be erased. Ruth, who reads nothing of the hire, answers the request. ──
+  TestClock.Advance(TimeSpan.FromDays(1));
+  Guid erasure = Guid.Empty;
+  runas (Ruth) {
+    Assert.Equal(0, RepositoryItem.Count());
+    var r = FileRequest(Osysharp.Privacy.RequestKind.Erasure, null, "tomas@reyes.example", IdentityCheck.KnownDetails, "He wrote from the address on his application.");
+    ApproveRequest(r);
+    erasure = r.Id;
+  }
+  LetItGoOn(hire);
+  runas (Ruth) {
+    var done = PrivacyRequest.Single(r => r.Id == erasure);
+    Assert.Equal("", done.Problem);
+    Assert.Equal(RequestState.Done, done.State);
+  }
+  // Not a word of him is left in what the hire holds, in what the agents did, or in the firm's own rows…
+  var left = EverythingSaidOf(hire);
+  Assert.DoesNotContain("Tomas", left);
+  Assert.DoesNotContain("Reyes", left);
+  Assert.DoesNotContain("payroll", left);
+  runas (Noor) {
+    // …and everything keeps its place: that somebody applied and withdrew, that there was an application and an
+    // assessment, that the applications were read, what that cost — and the record of it still checks.
+    Assert.Equal(1, Applicant.Count(a => a.Name == "A candidate who asked to be erased" && a.Standing == CandidateStanding.Withdrawn));
+    var h = TheHire(hire);
+    Assert.Equal(1, ItemsOf(h.Job, ItemKind.Document).Count(i => i.Title == "Document (erased)"));
+    Assert.Equal(1, ItemsOf(h.Job, ItemKind.Finding).Count(i => i.Title == "Finding (erased)"));
+    var reading = AgentTask.Single(t => t.RunItem == hire && t.RunState == "Screening" && t.Parent == null);
+    Assert.NotNull(reading.ContentErasedAt);
+    Assert.True(reading.SpentMicros > 0);
+    Assert.True(VerifyTrace(reading).Intact);
+    // The others are word for word as they were, and the hire goes on.
+    Assert.Equal("Led the rollout of a case system for two county councils, alone on site.", Named("Ilse Varga").AssessedWhy);
+    Assert.Equal(HireStage.Interviewing, h.Stage);
+    Assert.Equal(AssignmentState.Open, h.Job.State);
+  }
+  // The same day Emil, who met Petra, answers on his form.
+  runas (Emil) {
+    var mine = Mine("Your feedback on Petra Olin");
+    Assert.Equal(Osysharp.HumanRequests.RequestKind.Information, mine.Asks);
+    AnswerRequest(mine, RequestAnswer.Of(new InterviewFeedback { ClientReady = true, Saw = "Calm, exact, and has done this many times." }));
+  }
+  LetItGoOn(hire);
+
+  // ── Wed 19 Mar. Signe is away: her request's date passes and it goes on to Emil. Thu 20 Mar: he answers it. ──
+  TestClock.Advance(TimeSpan.FromDays(1));
+  LetItGoOn(hire);
+  runas (Noor) {
+    var late = HumanRequest.Single(r => r.Title == "Your feedback on Ilse Varga");
+    Assert.NotNull(late.OverdueAt);
+    Assert.Equal("Emil Brandt", late.EscalatedTo!.DisplayName);
+    Assert.Equal(RequestStatus.Open, late.Status);
+  }
+  TestClock.Advance(TimeSpan.FromDays(1));
+  runas (Emil) {
+    AnswerRequest(Mine("Your feedback on Ilse Varga"), RequestAnswer.Of(new InterviewFeedback { ClientReady = true, Saw = "Clear with a client, and honest about what she has not done." }));
+  }
+  LetItGoOn(hire);
+
+  // ── The coordinator compares, and proposes the offer to the manager the work is done for. She says no. ──
+  runas (Vera) {
+    var h = TheHire(hire);
+    Assert.Equal(HireStage.Comparing, h.Stage);
+    Assert.Equal(CriterionState.Met, CriterionOf(h.Job, "interviewed").State);
+    var proposal = Mine("Hiring");
+    Assert.Equal(Osysharp.HumanRequests.RequestKind.Approval, proposal.Asks);
+    Assert.Equal("Petra Olin has led the larger rollouts, and both interviewers would put her in front of a client. The top of the range.", proposal.Context);
+    Assert.EndsWith("proposes: Offer the place", proposal.Title);
+    Assert.Null(h.Offered);
+    AnswerRequest(proposal, RequestAnswer.Reject("Petra cannot start before August. We need somebody by 1 June."));
+  }
+  LetItGoOn(hire);
+  // Nothing was offered. It proposes again; she says yes, and the offer is made as her.
+  runas (Vera) {
+    Assert.Null(TheHire(hire).Offered);
+    var proposal = Mine("Hiring");
+    Assert.Equal("Ilse Varga can start in April, and has led a rollout alone for two councils.", proposal.Context);
+    AnswerRequest(proposal, RequestAnswer.Approve());
+  }
+  LetItGoOn(hire);
+  runas (Noor) {
+    var h = TheHire(hire);
+    Assert.Equal(HireStage.Offering, h.Stage);
+    Assert.Equal("Ilse Varga", h.Offered!.Name);
+    Assert.Equal(66000, h.OfferSalary);
+    var decision = ItemOf(h.Job, "decision")!;
+    Assert.Equal("The offer goes to Ilse Varga", decision.Title);
+    Assert.Equal("The comparison, approved by Vera Lindqvist", CurrentOf(decision).From);
+    // What done means is not met by an offer made: the job cannot be closed yet.
+    Assert.Throws<CriteriaUnmet>(() => CompleteAssignment(h.Job, "Offered."));
+  }
+
+  // ── Mon 24 Mar. Ilse says yes through her link, to exactly what was offered. ──
+  TestClock.Advance(TimeSpan.FromDays(4));
+  var offer = LinkMailedTo("ilse@varga.example", "Our offer");
+  Assert.Equal("Ilse Varga at 66000", ViewByLink(AnswerLink.From(offer)).Version);
+  AnswerByLink(AnswerLink.From(offer), RequestAnswer.Approve(), "Ilse Varga");
+  LetItGoOn(hire);
+  runas (Noor) {
+    var h = TheHire(hire);
+    Assert.Equal(HireStage.Hired, h.Stage);
+    Assert.Equal(CandidateStanding.Hired, Named("Ilse Varga").Standing);
+    Assert.Equal(AssignmentState.Completed, h.Job.State);
+    Assert.Equal("Ilse Varga joins at 66000 kr a month, starting 1 June.", h.Job.Outcome);
+    Assert.Equal(3, h.Job.Criteria.Count(c => c.State == CriterionState.Met));
+    // The last criterion is met by the candidate's own answer.
+    Assert.Equal(HumanRequest.Single(r => r.Title.StartsWith("Our offer")).Id, CriterionOf(h.Job, "accepted").Evidence);
+    Assert.Equal(0, HumanRequest.Count(r => r.Status == RequestStatus.Open));
+  }
+}
+
+// ── read back ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+[Test(Firm)]
+void the_run_of_a_hire_tells_whom_it_asked_and_who_answered_in_each_state() {
+  var hire = TheHireUntilTheInterviews();
+  TheHireFromTheInterviews(hire);
+  runas (Noor) {
+    var view = ProcessRunOf(ProcessRunAbout("Hiring", hire)!.Id)!;
+    Assert.Equal("Senior implementation consultant", view.Card.Title);
+    Assert.Equal("Hiring", view.Card.Process);
+    Assert.Equal(ProcessStatus.Finished, view.Card.Status);
+    Assert.Equal("21 days", view.Card.Age);
+    Assert.Equal([
+      "Clarifying the role", "Taking applications", "Reading applications", "Read by hand", "Interviewing",
+      "Comparing the candidates", "Waiting for the candidate's answer", "Hired",
+    ], view.Stays.Select(s => s.Label).ToList());
+    Assert.Equal(["1 day", "8 days", "under a minute", "1 day", "7 days", "under a minute", "4 days"], view.Stays.Take(7).Select(s => s.Lasted).ToList());
+    // A step an agent could not finish says what the process did about it.
+    Assert.Equal([
+      "Hiring coordinator was given work: read the applications.",
+      "Hiring coordinator finished: read the applications.",
+      "1 of the applications could not be read by the agents, so the talent partner reads them by hand.",
+    ], view.Stays[2].Moments.Select(m => m.Said).ToList());
+    Assert.Equal(ProcessNoteTone.Problem, view.Stays[2].Moments[2].Tone);
+    // ⭐ ONE STATE THAT ASKED FIVE PEOPLE says each of them: three through links — one of whom withdrew and was
+    // erased, so its lines say that and nothing of him; one interviewer who answered; one whose request went on.
+    Assert.Equal([
+      "Asked Ilse Varga, by a link: “When could you meet us?”",
+      "Asked Petra Olin, by a link: “When could you meet us?”",
+      "Somebody was asked something here who has since asked to be erased.",
+      "Ilse Varga answered “When could you meet us?” after 1 day.",
+      "Petra Olin answered “When could you meet us?” after 2 days.",
+      "Asked Emil Brandt: “Your feedback on Petra Olin”",
+      "Asked Signe Nyberg: “Your feedback on Ilse Varga”",
+      "Somebody was asked something here who has since asked to be erased.",
+      "Emil Brandt answered “Your feedback on Petra Olin” after 1 day.",
+      "“Your feedback on Ilse Varga” was not answered in time. It went on to Emil Brandt.",
+      "Emil Brandt answered “Your feedback on Ilse Varga” after 3 days.",
+    ], view.Stays[4].Moments.Select(m => m.Said).ToList());
+    // What the coordinator proposed is told by its own work — the manager's decision is not said twice.
+    Assert.Equal([
+      "Hiring coordinator was given work: compare the candidates.",
+      "Hiring coordinator's work waits for a person.",
+      "Hiring coordinator's work waits for a person.",
+      "Hiring coordinator finished: compare the candidates.",
+    ], view.Stays[5].Moments.Select(m => m.Said).ToList());
+    Assert.Equal([
+      "Asked Ilse Varga, by a link: “Our offer: Senior implementation consultant”",
+      "Ilse Varga approved “Our offer: Senior implementation consultant” after 4 days.",
+    ], view.Stays[6].Moments.Select(m => m.Said).ToList());
+    // A moment that is a request opens it.
+    Assert.Equal(RequestSubject(), view.Stays[6].Moments[0].SubjectKind);
+    Assert.True(view.Cost.Known);
+    Assert.True(view.Cost.Spent > 0);
+  }
+}
+
+[Test(Firm)]
+void each_reader_of_a_hire_sees_what_is_theirs() {
+  var hire = TheHireUntilTheInterviews();
+  TheHireFromTheInterviews(hire);
+  Guid job = Guid.Empty;
+  Guid run = Guid.Empty;
+  // The talent partner: everything the hire holds, the run with what it cost, and the agents' work.
+  runas (Noor) {
+    var h = TheHire(hire);
+    job = h.Job.Id;
+    run = ProcessRunAbout("Hiring", hire)!.Id;
+    Assert.Equal(["The manager's request", "What the role needs"], ItemsOf(h.Job, ItemKind.Input).Select(i => i.Title).ToList());
+    Assert.Equal(4, ItemsOf(h.Job, ItemKind.Document).Count);
+    Assert.Equal(6, ItemsOf(h.Job, ItemKind.Finding).Count);                 // four assessments, two interviews
+    Assert.Equal(["The offer goes to Ilse Varga"], ItemsOf(h.Job, ItemKind.Decision).Select(i => i.Title).ToList());
+    Assert.True(ProcessRunOf(run)!.Cost.Known);
+    Assert.Equal(7, AgentTask.Count());
+    // This app turned the filing of agents' results off (`AgentFindingsSetup.FileResults = false`): agent work on the
+    // job ended done, and nothing it handed back was filed as a finding of its own.
+    Assert.True(AssignmentWork.Count(w => w.Assignment == h.Job && w.Kind == WorkKind.AgentTask && w.State == WorkState.Done) > 0);
+    Assert.Equal(0, RepositoryItem.Count(i => i.Key.StartsWith("agent-result:")));
+  }
+  // The manager: her hire, its run, and what was thought of each candidate — and not what the models cost.
+  runas (Vera) {
+    var h = TheHire(hire);
+    Assert.Equal(6, ItemsOf(h.Job, ItemKind.Finding).Count);
+    var view = ProcessRunOf(run)!;
+    Assert.Equal("Senior implementation consultant", view.Card.Title);
+    Assert.False(view.Cost.Known);
+  }
+  // An interviewer: the hire and who is in the running — and not what anybody thought of a candidate, his own
+  // feedback included once it is given; not the run; not the agents' work.
+  runas (Emil) {
+    Assert.Equal(1, Hire.Count());
+    Assert.Equal(4, Applicant.Count());
+    Assert.Equal(0, ItemsOf(Assignment.Single(a => a.Id == job), ItemKind.Finding).Count);
+    Assert.Equal(4, ItemsOf(Assignment.Single(a => a.Id == job), ItemKind.Document).Count);
+    Assert.Throws<NotAuthorized>(() => ProcessRunOf(run));
+    Assert.Equal(0, AgentTask.Count());
+    Assert.Equal(0, Requests.Mine().Count);
+  }
+  // The people-data officer answered a request about a candidate without reading one thing the hire holds.
+  runas (Ruth) {
+    Assert.Equal(1, PrivacyRequest.Count());
+    Assert.Equal(0, RepositoryItem.Count());
+    Assert.Equal(0, Hire.Count());
+    Assert.Equal(0, Applicant.Count());
+    Assert.Equal(0, AgentTask.Count());
+  }
+  // A candidate's link: used, it opens its one request with what was answered — and nothing else.
+  var link = LinkMailedTo("ilse@varga.example", "Our offer");
+  Assert.Equal("Our offer: Senior implementation consultant", ViewByLink(AnswerLink.From(link)).Title);
+  Assert.Equal(0, HumanRequest.Count());
+  Assert.Equal(0, Applicant.Count());
+  Assert.Equal(0, Hire.Count());
+}
+
+// A request put to somebody outside keeps who they were until they ask to be erased — then the request keeps only
+// that it was put and how it ended, and the run's line about it says so without them (Osysharp.Privacy.HumanRequests).
+[Test(Firm)]
+void a_candidate_who_is_erased_is_gone_from_what_was_asked_of_him_too() {
+  var hire = TheHireUntilTheInterviews();
+  TheHireFromTheInterviews(hire);
+  runas (Noor) {
+    Assert.Equal(0, HumanRequest.Count(r => r.OutsideEmail == "tomas@reyes.example" || r.OutsideName == "Tomas Reyes" || r.SubjectLabel == "Tomas Reyes"));
+    var view = ProcessRunOf(ProcessRunAbout("Hiring", hire)!.Id)!;
+    Assert.False(view.Stays[4].Moments.Any(m => m.Said.Contains("Tomas")));
+    // The request is still there, called off, with what is left of it.
+    var his = HumanRequest.Single(r => r.ErasedAt != null);
+    Assert.Equal(RequestStatus.Cancelled, his.Status);
+    Assert.Equal("When could you meet us?", his.Title);
+    Assert.Contains("Somebody was asked something here who has since asked to be erased.", view.Stays[4].Moments.Select(m => m.Said).ToList());
+  }
+}

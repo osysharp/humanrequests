@@ -1,0 +1,146 @@
+// The hire, on screen — driven as the people of the firm, at three moments of it: the manager's inbox on the Thursday
+// the coordinator proposes an offer; the hire's run page once it is over, where one state says the five people it
+// asked; and the page of the coordinator's reading of the applications, with the four it handed on.
+// `osy test --pixels` photographs each — wide and on a phone, light and dark (`Ui.Shot`).
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+using Osysharp.HumanRequests;
+using Osysharp.Assignments;
+using Osysharp.WorkRepositories;
+using Osysharp.Llm;
+using Osysharp.Agents;
+using Osysharp.Agents.Testing;
+using Osysharp.Agents.HumanRequests;
+using Osysharp.Agents.Inspector;
+using Osysharp.Processes;
+using Osysharp.Workflow;
+using Staffing;
+
+/// ⭐ THE INBOX MOMENT: the offer the coordinator proposes is a request in the manager's inbox, with what it would
+/// do and why — and which hire it is part of. She says no, with a reason, there; and yes to the next.
+[Test(Firm)]
+void the_manager_reads_the_offer_the_coordinator_proposes_and_says_no_in_her_inbox() {
+  var hire = TheHireUntilTheInterviews();
+  TheHireToTheProposal(hire);
+  Guid item = Guid.Empty;
+  Guid job = Guid.Empty;
+  runas (Vera) { item = Mine("Hiring").Id; job = TheHire(hire).Job.Id; }
+
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Vera);
+  Ui.Visit("/inbox/mine/i/" + item);
+  Assert.Visible("proposes: Offer the place");
+  Assert.Visible("Petra Olin has led the larger rollouts, and both interviewers would put her in front of a client. The top of the range.");
+  Assert.Visible("Petra Olin");
+  Assert.Visible("70000 kr a month");
+  Assert.Visible("Hire: Senior implementation consultant", within: "Part of an assignment");
+  Assert.NoOverflow();
+  Ui.Shot("hire-inbox-proposal-wide-light");
+  Ui.Theme("dark");
+  Ui.Shot("hire-inbox-proposal-wide-dark");
+  Ui.Theme("light");
+
+  Ui.Viewport(390, 844);
+  Ui.Visit("/inbox/mine/i/" + item);
+  Assert.Visible("proposes: Offer the place");
+  Assert.NoOverflow();
+  Ui.Shot("hire-inbox-proposal-phone-light");
+  Ui.Theme("dark");
+  Ui.Shot("hire-inbox-proposal-phone-dark");
+  Ui.Theme("light");
+
+  // The job's page, meanwhile, says on whom it waits, and what it holds.
+  Ui.Viewport(1440, 900);
+  Ui.Visit("/jobs/" + job);
+  Assert.Visible("Hire: Senior implementation consultant");
+  Assert.Visible("proposes: Offer the place", within: "Waiting on people");
+  Assert.Visible("Application: Ilse Varga");
+  Assert.Visible("Document (erased)");
+  Assert.NoOverflow();
+  Ui.Shot("hire-job-waiting-wide-light");
+}
+
+/// ⭐ THE RUN PAGE, once somebody is hired: the process drawn with the way it went, each state it was in and for how
+/// long — and, in the state that asked five people, each of them and what came of it.
+[Test(Firm)]
+void the_run_page_of_a_hire_says_whom_it_asked_in_each_state() {
+  var hire = TheHireUntilTheInterviews();
+  TheHireFromTheInterviews(hire);
+  Guid run = Guid.Empty;
+  runas (Noor) { run = ProcessRunAbout("Hiring", hire)!.Id; }
+
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Noor);
+  Ui.Visit("/hires");
+  Assert.Visible("Senior implementation consultant", within: "Runs");
+  Ui.Click("Senior implementation consultant");
+
+  Assert.Visible("Senior implementation consultant", within: "Where it stands");
+  Assert.Visible("Finished", within: "Where it stands");
+  Assert.Visible("21 days", within: "In figures");
+  Assert.Visible("1 of the applications could not be read by the agents, so the talent partner reads them by hand.", within: "State 3, Reading applications");
+  Assert.Visible("Asked Petra Olin, by a link: “When could you meet us?”", within: "State 5, Interviewing");
+  Assert.Visible("Somebody was asked something here who has since asked to be erased.", within: "State 5, Interviewing");
+  Assert.Visible("“Your feedback on Ilse Varga” was not answered in time. It went on to Emil Brandt.", within: "State 5, Interviewing");
+  Assert.Visible("Ilse Varga approved “Our offer: Senior implementation consultant” after 4 days.", within: "State 7, Waiting for the candidate's answer");
+  Assert.Visible("From any state: withdraw leads to Withdrawn.");
+  Assert.NoOverflow();
+  Ui.Shot("hire-run-wide-light");
+  Ui.Theme("dark");
+  Ui.Shot("hire-run-wide-dark");
+  Ui.Theme("light");
+
+  // A line about a request opens the request in place: what was asked, and what came back.
+  Ui.Click("Open: Emil Brandt answered “Your feedback on Ilse Varga” after 3 days.");
+  Assert.Visible("Clear with a client, and honest about what she has not done.", within: "Opened step");
+  Assert.NoOverflow();
+  Ui.Shot("hire-run-request-open-wide-light");
+  Ui.Click("Close: Emil Brandt answered “Your feedback on Ilse Varga” after 3 days.");
+
+  Ui.Viewport(390, 844);
+  Ui.Visit("/hires/" + run);
+  Assert.Visible("Senior implementation consultant", within: "Where it stands");
+  Assert.NoOverflow();
+  Ui.Shot("hire-run-phone-light");
+  Ui.Theme("dark");
+  Ui.Shot("hire-run-phone-dark");
+  Ui.Theme("light");
+
+  // The manager follows the hire too — and is not shown what the models cost.
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Vera);
+  Ui.Visit("/hires/" + run);
+  Assert.Visible("Senior implementation consultant", within: "Where it stands");
+  Assert.Hidden("Spent on models");
+}
+
+/// ⭐ ONE PIECE OF THE AGENTS' WORK, opened: the coordinator's comparison — what it was given, what it looked at, the
+/// offer the manager refused and the one she approved.
+[Test(Firm)]
+void the_coordinators_comparison_is_opened_with_the_offer_that_was_refused() {
+  var hire = TheHireUntilTheInterviews();
+  TheHireFromTheInterviews(hire);
+  Guid work = Guid.Empty;
+  runas (Noor) { work = AgentTask.Single(t => t.RunItem == hire && t.RunState == "Comparing" && t.Parent == null).Id; }
+
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Noor);
+  Ui.Visit("/work/" + work + "/0");
+  Assert.Visible("The candidates for Senior implementation consultant");
+  Assert.Visible("Petra cannot start before August. We need somebody by 1 June.");
+  // What it was given reads as it was written — the dash in the salary range as a dash.
+  Assert.Visible("62000–70000 kr a month, to start by 1 June.");
+  Assert.NoOverflow();
+  Ui.Shot("hire-work-wide-light");
+  Ui.Theme("dark");
+  Ui.Shot("hire-work-wide-dark");
+  Ui.Theme("light");
+
+  Ui.Viewport(390, 844);
+  Ui.Visit("/work/" + work + "/0");
+  Assert.Visible("The candidates for Senior implementation consultant");
+  Assert.NoOverflow();
+  Ui.Shot("hire-work-phone-light");
+  Ui.Theme("dark");
+  Ui.Shot("hire-work-phone-dark");
+}

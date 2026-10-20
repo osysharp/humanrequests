@@ -1,0 +1,41 @@
+// The firm the tests run in: Vera, a director, asks for the hire and decides the offer; Noor, the talent partner,
+// owns it and answers for the agents; Emil and Signe interview; Ruth answers privacy requests. Four people apply —
+// none of them has an account.
+using Osysharp.Identity;
+using Osysharp.Organizations;
+using Osysharp.Organizations.ServicePlans;
+using Osysharp.WorkQueues;
+using Osysharp.HumanRequests;
+using Osysharp.Assignments;
+using Osysharp.Agents;
+using Osysharp.Workflow;
+using Staffing;
+
+[TestFixture]
+void Firm() {
+  var vera = new Person { Email = "vera@tallisandwren.example", DisplayName = "Vera Lindqvist", CodeHash = Security.HashPassword("1111") };
+  var noor = new Person { Email = "noor@tallisandwren.example", DisplayName = "Noor Haddad",    CodeHash = Security.HashPassword("2222") };
+  var emil = new Person { Email = "emil@tallisandwren.example", DisplayName = "Emil Brandt",    CodeHash = Security.HashPassword("3333") };
+  var signe= new Person { Email = "signe@tallisandwren.example", DisplayName = "Signe Nyberg",    CodeHash = Security.HashPassword("4444") };
+  var ruth = new Person { Email = "ruth@tallisandwren.example", DisplayName = "Ruth Okoye",     CodeHash = Security.HashPassword("5555") };
+  new RoleGrant { Member = vera, Role = FirmRole.Director };
+  new RoleGrant { Member = noor, Role = FirmRole.TalentPartner };
+  new RoleGrant { Member = emil, Role = FirmRole.Interviewer };
+  new RoleGrant { Member = signe, Role = FirmRole.Interviewer };
+  new RoleGrant { Member = ruth, Role = FirmRole.PeopleData };
+
+  new OrganizationTier { Name = "Standard", Rank = 1, IsDefault = true };
+  var queue = new Queue { Name = "Hiring", Position = 1 };
+  foreach (var p in new List<Person> { vera, noor, emil, signe, ruth }) { new QueueMember { Queue = queue, Member = p }; }
+  new AgentSeat { Agent = "Staffing.HiringCoordinator", Sponsor = noor };
+  new AgentSeat { Agent = "Staffing.ApplicationReader", Sponsor = noor };
+}
+
+principal Vera => Person.Single(p => p.Email == "vera@tallisandwren.example");
+principal Noor => Person.Single(p => p.Email == "noor@tallisandwren.example");
+principal Emil => Person.Single(p => p.Email == "emil@tallisandwren.example");
+principal Signe=> Person.Single(p => p.Email == "signe@tallisandwren.example");
+principal Ruth => Person.Single(p => p.Email == "ruth@tallisandwren.example");
+
+Hire TheHire(Guid id) { return Hire.Single(h => h.Id == id); }
+Applicant Named(string name) { return Applicant.Single(c => c.Name == name); }

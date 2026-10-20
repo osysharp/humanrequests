@@ -1,0 +1,119 @@
+// The firm's screens — the inbox as the WorkQueues kit draws it, a hire's run as the Processes kit draws it, and a job's
+// page as the Assignments kit draws it.
+namespace Staffing;
+
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+using Osysharp.HumanRequests;
+using Osysharp.Assignments;
+using Osysharp.WorkRepositories;
+using Osysharp.Agents;
+using Osysharp.Agents.Inspector;
+using Osysharp.Processes;
+
+[Layout]
+component FirmFrame() {
+  live var me = Session.CurrentUser;
+  live var myName = me == null ? "" : me.DisplayName;
+  action SignOut() { Session.SignOut(); }
+  action Appearance() { Theme.Toggle(); }
+  render {
+    InboxShell(new AppChrome {
+      Product = "Tallis & Wren",
+      Tagline = "Hiring",
+      Mark = Icons.Inbox,
+      Home = "/inbox/mine",
+      Panes = true,
+      User = new ShellUser {
+        Name = myName, Initials = InitialsOf(myName == "" ? "?" : myName), Presence = ShellPresence.Online,
+        Menu = [
+          new MenuAction { Label = "Appearance", Icon = Icons.Eye, OnPress = Appearance },
+          new MenuAction { Label = "Sign out", Icon = Icons.Logout, OnPress = SignOut, Tone = Tone.Danger, Divided = true },
+        ],
+      },
+      Nav = [ new NavItem { Kind = NavKind.Section, Label = "Hiring", Children = [
+        new NavItem { Label = "Hires", To = "/hires", Icon = Icons.Users },
+      ] } ],
+    }) {
+      Outlet(retain: 4);
+    }
+  }
+}
+
+[Route("/")] [Layout(FirmFrame)] [Authorize(WorksInbox)] [Render(CSR)] [Title("Inbox")]
+component Home() {
+  render { InboxPanes("mine", r => "/inbox/mine/i/" + r.Id, Guid.Empty) { InboxOverview("mine"); } }
+}
+
+[Route("/inbox/{view}")] [Layout(FirmFrame)] [Authorize(WorksInbox)] [Render(CSR)] [Title("Inbox")]
+component InboxPage(string view) {
+  render { InboxPanes(view, r => "/inbox/" + view + "/i/" + r.Id, Guid.Empty) { InboxOverview(view); } }
+}
+
+[Route("/inbox/{view}/i/{id}")] [Layout(FirmFrame)] [Authorize(WorksInbox)] [Render(CSR)] [Title("Item")]
+component ItemPage(string view, Guid id) {
+  live var items = WorkItem.Where(w => w.Id == id).Include(w => w.Queue).Include(w => w.Assignee).ToList();
+  render {
+    InboxPanes(view, r => "/inbox/" + view + "/i/" + r.Id, id) {
+      Stack(gap: 0, grow: 1, minW: "0", h: "100%", minH: "0", overflowY: Overflow.Auto) {
+        if (!Layout.AtLeast(Tablet)) {
+          Row(px: 4, pt: 3) { Link(href: "/inbox/" + view, label: "Back to the list") { Icon(Icons.ChevronLeft); } }
+        }
+        foreach (var item in items) { WorkItemView(item); }
+      }
+    }
+  }
+}
+
+/// A job's page.
+[Route("/jobs/{id}")] [Layout(FirmFrame)] [Authorize(IsStaff)] [Render(CSR)] [Title("Job")]
+component JobPage(Guid id) {
+  render {
+    Stack(gap: 5, p: 5, maxW: "860px", w: "100%", h: "100%", overflowY: Overflow.Auto) {
+      AssignmentView(id);
+    }
+  }
+}
+
+/// Every hire the firm has under way or behind it.
+[Route("/hires")] [Layout(FirmFrame)] [Authorize(FollowsProcesses)] [Render(CSR)] [Title("Hires")]
+component HiresPage() {
+  render {
+    Stack(gap: 6, px: 5, py: 6, w: "100%", maxW: "980px", h: "100%", overflowY: Overflow.Auto) {
+      PageHead("Hires", subtitle: "Every role the firm is filling, and where each one stands.");
+      ProcessRuns();
+    }
+  }
+}
+
+/// One hire, from the manager's request to where it is.
+[Route("/hires/{run}")] [Layout(FirmFrame)] [Authorize(FollowsProcesses)] [Render(CSR)] [Title("A hire")]
+component HirePage(Guid run) {
+  render {
+    Stack(gap: 5, px: 5, py: 6, w: "100%", maxW: "980px", h: "100%", overflowY: Overflow.Auto) {
+      Row { TextLink("All hires", to: "/hires"); }
+      ProcessRunInspector(run);
+    }
+  }
+}
+
+/// One piece of an agent's work — and, with a step's number, that step marked.
+[Route("/work/{task}/{step}")] [Layout(FirmFrame)] [Authorize(UsesAgents)] [Render(CSR)] [Title("An agent's work")]
+component WorkPage(Guid task, int step) {
+  render {
+    Stack(gap: 5, px: 5, py: 6, w: "100%", maxW: "980px", h: "100%", overflowY: Overflow.Auto) {
+      Row { TextLink("All hires", to: "/hires"); }
+      WorkInspector(task, step: step);
+    }
+  }
+}
+
+/// One thing a job holds.
+[Route("/items/{id}")] [Layout(FirmFrame)] [Authorize(IsStaff)] [Render(CSR)] [Title("An item")]
+component ItemOfAJobPage(Guid id) {
+  render {
+    Stack(gap: 5, px: 5, py: 6, w: "100%", maxW: "860px", h: "100%", overflowY: Overflow.Auto) {
+      RepositoryItemView(id);
+    }
+  }
+}

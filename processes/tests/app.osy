@@ -1,0 +1,45 @@
+// The producer's test project for Osysharp.HumanRequests.Processes — an engineering consultancy hiring a senior
+// implementation consultant. The hire is a process that asks people at most of its steps: the hiring manager is asked
+// what her request left open; three candidates, who have no accounts, are asked through links when they can meet; two
+// interviewers are asked for their feedback on forms, and one request goes on to a colleague when its date passes; the
+// manager decides the offer an agent proposes — refuses the first, approves the second; and the candidate accepts
+// through a link. Agents do the reading: one clarifies the role and compares the candidates, one reads each
+// application — and runs out of its allowance on the longest, which the talent partner then reads by hand. A candidate
+// withdraws half-way and asks to be erased. The run tells every one of those requests, in the state that put it.
+// No model is ever called: its one model is scripted.
+app Staffing {
+  model "model/**/*.osy";
+  tests "**/*.test.osy";
+  use Osysharp.HumanRequests@1;
+  use Osysharp.Processes@1;
+  use Osysharp.HumanRequests.Processes@1;
+  use Osysharp.Agents@1;
+  use Osysharp.Agents.Testing@1;
+  use Osysharp.Agents.HumanRequests@1;
+  use Osysharp.Agents.Inspector@1;
+  use Osysharp.Agents.Processes@1;
+  use Osysharp.Assignments@1;
+  use Osysharp.Assignments.Agents@1;
+  use Osysharp.Assignments.WorkQueues@1;
+  use Osysharp.WorkRepositories@1;
+  use Osysharp.WorkRepositories.Agents@1;
+  use Osysharp.WorkQueues@1;
+  use Osysharp.Privacy@0;
+  use Osysharp.Privacy.Agents@1;
+  use Osysharp.Privacy.Assignments@1;
+  use Osysharp.Privacy.WorkRepositories@1;
+  use Osysharp.Privacy.Llm@1;
+  use Osysharp.Privacy.HumanRequests@1;
+  use Osysharp.Mail@0;
+  use Osysharp.Llm@2;
+  use Osysharp.Identity@0;
+  use Osysharp.Organizations@0;
+  use Osysharp.Organizations.ServicePlans@0;
+  use Osysharp.Presence@0;
+  use Osysharp.Observability;
+  use Osysharp.Workflow;
+  use Osysharp.ServiceHours;
+  use Osysharp.Storage;
+  use Osysharp.Diagrams@0;
+  use Osysharp.Ui;
+}

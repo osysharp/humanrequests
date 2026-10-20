@@ -1,0 +1,689 @@
+// Tallis & Wren, an engineering consultancy: its people, a hire and its candidates, what the hire asks of people,
+// the two agents that do its reading, and the process that carries it from the manager's request to an accepted offer.
+namespace Staffing;
+
+using Osysharp.Identity;
+using Osysharp.Organizations;
+using Osysharp.WorkQueues;
+using Osysharp.HumanRequests;
+using Osysharp.Assignments;
+using Osysharp.Assignments.WorkQueues;
+using Osysharp.Assignments.Agents;
+using Osysharp.WorkRepositories;
+using Osysharp.WorkRepositories.Agents;
+using Osysharp.Agents;
+using Osysharp.Agents.HumanRequests;
+using Osysharp.Llm;
+using Osysharp.Workflow;
+using Osysharp.Processes;
+using Osysharp.ServiceHours;
+using Osysharp.Privacy;
+using Osysharp.Privacy.Agents;
+using Osysharp.Privacy.WorkRepositories;
+
+[Role] enum FirmRole { Authenticator, Director, TalentPartner, Interviewer, PeopleData, Coordinating, Reading }
+
+partial entity RoleGrant { security { allow read when IsAuthenticated; } }
+
+policy IsDirector      => RoleGrant.Any(g => g.Member == user && g.Role == FirmRole.Director);
+policy IsTalentPartner => RoleGrant.Any(g => g.Member == user && g.Role == FirmRole.TalentPartner);
+policy IsInterviewer   => RoleGrant.Any(g => g.Member == user && g.Role == FirmRole.Interviewer);
+policy IsPeopleData    => RoleGrant.Any(g => g.Member == user && g.Role == FirmRole.PeopleData);
+policy IsCoordinating  => RoleGrant.Any(g => g.Member == user && g.Role == FirmRole.Coordinating);
+policy IsReading       => RoleGrant.Any(g => g.Member == user && g.Role == FirmRole.Reading);
+policy IsAnAgent       => IsCoordinating || IsReading;
+/// The people who run a hire: the manager who asked for it and the talent partner who owns it.
+policy IsHiring        => IsDirector || IsTalentPartner;
+policy IsStaff         => IsHiring || IsInterviewer || IsPeopleData;
+
+// The inbox: everybody at the firm has one, and so do the agents' accounts; the talent partner leads it.
+policy WorksInbox       => IsStaff || IsAnAgent;
+policy LeadsInbox       => IsTalentPartner;
+policy AdministersInbox => IsTalentPartner;
+policy ManagesOrganizations  => IsTalentPartner;
+policy CollaboratesOnRecords => IsHiring;
+// Requests: the people who run a hire put them; the talent partner oversees them.
+policy AsksPeople       => IsHiring;
+policy OverseesRequests => IsTalentPartner;
+// The hire is an assignment: a director asks for one; the talent partner oversees every hire.
+policy OpensAssignments            => IsDirector;
+policy OverseesAssignments         => IsTalentPartner;
+policy AcceptsAssignmentExceptions => IsDirector;
+// What a hire keeps is looked after by the talent partner. The people-data officer reads none of it — and answers a
+// privacy request about a candidate all the same.
+policy ManagesWorkRepositories => IsTalentPartner;
+// Agents: the people who run a hire give them work; the talent partner answers for them and reads what they did.
+policy UsesAgents        => IsHiring;
+policy SupervisesAgents  => IsTalentPartner;
+policy AuditsAgents      => IsTalentPartner;
+policy ReadsModelUsage   => IsTalentPartner;
+policy ManagesModelSpend => IsTalentPartner;
+// Processes: the people who run a hire follow it.
+policy FollowsProcesses => IsHiring;
+// Privacy: the people-data officer answers requests and places holds. A request is inbox work.
+policy ManagesPrivacy   => IsPeopleData;
+policy PlacesLegalHolds => IsPeopleData;
+
+/// Somebody at the firm — and the agents' own accounts. Candidates have none: they write in, and answer through links.
+entity Person : Principal {
+  [MaxLength(200)] string CodeHash = "";
+  security {
+    allow read when IsAuthenticated || IsAuthenticator;
+    allow create when IsAuthenticator;
+    deny read CodeHash when !IsAuthenticator;
+  }
+}
+
+partial entity ServiceHours { security { allow read when IsStaff; allow create, update, delete when IsTalentPartner; } }
+partial entity ServiceWindow { security { allow read when IsStaff; allow create, update, delete when IsTalentPartner; } }
+partial entity ServiceException { security { allow read when IsStaff; allow create, update, delete when IsTalentPartner; } }
+partial entity WorkItem { security { allow read when IsStaff || IsAnAgent; } }
+
+public enum HireStage {
+  [Label("Clarifying the role")] Clarifying,
+  [Label("Taking applications")] Collecting,
+  [Label("Reading applications")] Screening,
+  [Label("Read by hand")] ByHand,
+  Interviewing,
+  [Label("Comparing the candidates")] Comparing,
+  [Label("Waiting for the candidate's answer")] Offering,
+  Hired,
+  [Label("No hire")] NoHire,
+  Withdrawn,
+}
+
+/// ⭐ A HIRE — the firm's own record of one role to fill. Behind it is the job: an assignment owned until somebody
+/// has accepted an offer.
+entity Hire {
+  [Required, MaxLength(160)] string Title;
+  [Required] Person Manager;
+  [Required] Person Partner;
+  [Required] Assignment Job;
+  /// The monthly salary range the manager asked for, in kronor.
+  decimal SalaryFloor;
+  decimal SalaryCeiling;
+  [MaxLength(600)] string Asked = "";
+  HireStage Stage = HireStage.Clarifying;
+  /// What the role needs, once it is clear.
+  [MaxLength(600)] string MustHave = "";
+  [MaxLength(60)] string StartBy = "";
+  /// Who the offer goes to, and at what salary — the manager's to decide, and the coordinator's account's for her.
+  Applicant? Offered;
+  decimal OfferSalary = 0;
+  [MaxLength(400)] string Note = "";
+  security {
+    allow read, create, update when IsHiring || IsAnAgent;
+    allow read when IsInterviewer;
+    deny update Offered, OfferSalary when !IsDirector && !IsCoordinating;
+  }
+}
+
+public enum CandidateStanding { Applied, Shortlisted, Declined, Withdrawn, Offered, Hired }
+
+/// Somebody who applied. What they sent is an item of the hire's repository; this row is who they are and where
+/// they stand.
+entity Applicant {
+  [Required] Hire Hire;
+  [Required, MaxLength(120)] string Name;
+  [MaxLength(200)] string Email = "";
+  CandidateStanding Standing = CandidateStanding.Applied;
+  /// Read by an agent or by hand, and what came of it.
+  bool Assessed = false;
+  bool Meets = false;
+  [MaxLength(400)] string AssessedWhy = "";
+  [MaxLength(200)] string Availability = "";
+  [MaxLength(60)] string CanStart = "";
+  /// An interviewer met them, and whether they would put them in front of a client.
+  bool Interviewed = false;
+  bool ClientReady = false;
+  security {
+    allow read, create, update when IsHiring || IsAnAgent;
+    allow read when IsInterviewer where Standing != CandidateStanding.Applied;
+  }
+}
+
+// ── what people are asked for ───────────────────────────────────────────────────────────────────────────────────────
+
+/// What a candidate is asked through their link.
+public class CandidateAvailability {
+  /// Two or three times you could meet us, in your own words.
+  [MaxLength(200)] public string CouldMeet = "";
+  /// The earliest month you could start.
+  [MaxLength(60)] public string CanStart = "";
+}
+
+/// What an interviewer is asked after the interview.
+public class InterviewFeedback {
+  /// Would you put this person in front of a client in their first month?
+  public bool ClientReady;
+  /// What you saw, in a few sentences.
+  [MaxLength(600)] public string Saw = "";
+}
+
+// ── what the agents can do ──────────────────────────────────────────────────────────────────────────────────────────
+
+/// Write down what the role needs, as the hire's requirements.
+[Action("Write the role's requirements down")]
+public string WriteRequirements(Hire hire, string mustHave, string startBy) {
+  hire.MustHave = mustHave;
+  hire.StartBy = startBy;
+  AddItem(hire.Job, new NewItem { Kind = ItemKind.Input, Key = "requirements", Title = "What the role needs",
+                                  Content = $"{mustHave} Start by {startBy}. {hire.SalaryFloor:0}–{hire.SalaryCeiling:0} kr a month.",
+                                  Source = new ItemSource { From = "The manager's request and her answer" } });
+  return "Written down.";
+}
+
+/// What a candidate sent in.
+[Action("Read the application", Query)]
+public string ReadApplication(Applicant candidate) {
+  var item = ItemOf(candidate.Hire.Job, "application-" + candidate.Id.ToString());
+  return item == null ? "No application is on file." : CurrentOf(item!).Content;
+}
+
+/// Record how an application stands against what the role needs.
+[Action("Record an assessment")]
+public string RecordAssessment(Applicant candidate, bool meets, string why) {
+  Assess(candidate, meets, why, "Read against what the role needs");
+  return "Recorded.";
+}
+
+/// Every candidate still in the running, with what is known of each.
+[Action("List the candidates", Query)]
+public List<string> CandidatesInTheRunning(Hire hire) {
+  return Applicant.Where(c => c.Hire == hire && c.Standing == CandidateStanding.Shortlisted).OrderBy(c => c.Name).ToList()
+    .Select(c => $"{c.Name} (id {c.Id}): can start {c.CanStart}. {c.AssessedWhy}").ToList();
+}
+
+/// Make the offer: this candidate, at this monthly salary.
+[Action("Offer the place")]
+public string OfferThePlace(Applicant candidate, decimal salary) {
+  var hire = candidate.Hire;
+  if (salary > hire.SalaryCeiling) { throw new ValidationException($"{salary:0} kr is above the range agreed for this role ({hire.SalaryCeiling:0} at most)."); }
+  hire.Offered = candidate;
+  hire.OfferSalary = salary;
+  candidate.Standing = CandidateStanding.Offered;
+  return $"The place is offered to {candidate.Name} at {salary:0} kr a month.";
+}
+
+string HireNamed(string value) {
+  var h = Hire.FirstOrDefault(x => x.Id == Guid.Parse(value));
+  return h == null ? value : h!.Title;
+}
+string CandidateNamed(string value) {
+  var c = Applicant.FirstOrDefault(x => x.Id == Guid.Parse(value));
+  return c == null ? value : c!.Name;
+}
+
+/// What the coordinator hands back when the role is clear.
+public class RoleProfile {
+  public string MustHave = "";
+  public string StartBy = "";
+}
+
+/// What the reader of one application hands back.
+public class Assessment {
+  public bool Meets;
+  public string Why = "";
+}
+
+/// What the coordinator hands back when the applications are read.
+public class Shortlist {
+  /// How many applications were read, and how many meet what the role needs.
+  public int Read;
+  public int Meet;
+  /// The applications nobody could read, by the candidate's name.
+  public List<string> NotRead = [];
+}
+
+/// What the coordinator hands back when the candidates are compared.
+public class Comparison {
+  public string Recommended = "";
+  public string Why = "";
+}
+
+/// Clarifies what a role needs before applications are taken.
+public class ClarifyTheRole : Skill<Hire, RoleProfile> {
+  public override string Description => "Clarify the role before applications are taken: ask the hiring manager what her request leaves open, and write the requirements down.";
+  public override List<ActionInfo> Tools => [Actions.Of(WriteRequirements)];
+  public override string Brief(Hire h) => $"{h.Title}, {h.SalaryFloor:0}–{h.SalaryCeiling:0} kr a month. The manager wrote: {h.Asked} The hire's id is {h.Id}.";
+  public override string Names(string action, string argument, string value) => argument == "hire" ? HireNamed(value) : value;
+}
+
+/// Reads one application against what the role needs. A long application is a long read, on a small allowance.
+public class AssessApplication : Skill<Applicant, Assessment> {
+  public override string Description => "Read one application against what the role needs, and record how it stands.";
+  public override List<ActionInfo> Tools => [Actions.Of(ReadApplication), Actions.Of(RecordAssessment)];
+  public override string Brief(Applicant c) => $"The application of {c.Name} for {c.Hire.Title}. The role needs: {c.Hire.MustHave} The candidate's id is {c.Id}.";
+  public override string Names(string action, string argument, string value) => argument == "candidate" ? CandidateNamed(value) : value;
+  public override string HandedSchema() => HandOn.ById("The candidate whose application to read.");
+  public override Applicant Handed(string inputJson) {
+    var id = HandOn.IdIn(inputJson);
+    return Applicant.Single(c => c.Id == id);
+  }
+}
+
+/// Has every application read, each by the reader.
+public class ReadTheApplications : Skill<Hire, Shortlist> {
+  public override string Description => "Have every application read against what the role needs, and say how many meet it.";
+  public override string Brief(Hire h) => $"{h.Title}. The role needs: {h.MustHave} The hire's id is {h.Id}.";
+}
+
+/// Compares the candidates who were interviewed, and makes the offer.
+public class CompareTheCandidates : Skill<Hire, Comparison> {
+  public override string Description => "Compare the candidates from what the hire holds, recommend one, and make the offer.";
+  public override string Instructions => "Read what the hire holds before you recommend anybody. Offer within the range.";
+  public override List<ActionInfo> Tools => [Actions.Of(CandidatesInTheRunning), Actions.Of(ListItems), Actions.Of(ReadItem), Actions.Of(OfferThePlace)];
+  public override string Brief(Hire h) => $"{h.Title}, {h.SalaryFloor:0}–{h.SalaryCeiling:0} kr a month, to start by {h.StartBy}. The hire's id is {h.Id}; its job's id is {h.Job.Id}.";
+  public override string Names(string action, string argument, string value) => argument == "hire" ? HireNamed(value) : argument == "candidate" ? CandidateNamed(value) : argument == "salary" ? value + " kr a month" : value;
+}
+
+/// Reads applications. What it records is an assessment, and nothing else.
+[Actor(Roles = [FirmRole.Reading])]
+public class ApplicationReader : Agent {
+  public static Person Principal => new Person { Email = "application-reader@tallisandwren.example", DisplayName = "Application reader" };
+  public override string Purpose => "You read job applications against what a role needs.";
+  public override List<SkillBase> Skills => [new AssessApplication()];
+  public override Permits May => new Permits { Alone = [Actions.Of(RecordAssessment)] };
+}
+
+/// ⭐ COORDINATES A HIRE. It writes the requirements down by itself and may ask the manager what her request leaves
+/// open; each application is handed to the reader, on a small allowance; an offer is proposed to a person, every time.
+[Actor(Roles = [FirmRole.Coordinating])]
+public class HiringCoordinator : Agent {
+  public static Person Principal => new Person { Email = "hiring-coordinator@tallisandwren.example", DisplayName = "Hiring coordinator" };
+  public override string Purpose => "You coordinate a hire for an engineering consultancy.";
+  public override List<SkillBase> Skills => [new ClarifyTheRole(), new ReadTheApplications(), new CompareTheCandidates()];
+  public override Permits May => new Permits { Alone = [Actions.Of(WriteRequirements), Actions.Of(RecordAssessment)], ProposeEveryTime = [Actions.Of(OfferThePlace)] };
+  public override AsksPeople People => new AsksPeople { MayChoose = true, About = "What the manager's request leaves open." };
+  public override Delegation Delegates => new Delegation { To = [Specialist.Of<ApplicationReader>(new AssessApplication(), budget: 0.006m)], MaxDepth = 1 };
+}
+
+// ── the process ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// ⭐ ONE HIRE, FROM THE MANAGER'S REQUEST TO AN ACCEPTED OFFER. Three steps are the coordinator's work; the rest ask
+/// people — the manager, the candidates through their links, the interviewers — and wait for them.
+workflow Hiring {
+  Tracks = Hire.Stage; Autostart = false; Initial = Clarifying;
+  /// The talent partner stops taking applications.
+  event CloseApplications();
+  /// Every application the agents could not read has been read by hand.
+  event ReadByHand();
+  /// The manager no longer wants the hire.
+  event Withdraw();
+
+  state Clarifying {
+    enter {
+      // The work is done for the manager: what the coordinator asks, it asks her.
+      var role = await AssignedWork.Do(this.Item.Job, Agents.Of<HiringCoordinator>().For(this.Item.Manager), new ClarifyTheRole(), this.Item,
+                                       key: "clarify", about: "What the role needs: " + this.Item.Title);
+      if (!role.Done) { Processes.Problem("The role could not be clarified by the coordinator: " + role.Problem + " Applications are taken on the manager's request as it stands."); }
+      MeetRoleIsClear(this.Item);
+      goto Collecting;
+    }
+  }
+  state Collecting {
+    subscribe CloseApplications();
+    enter { Processes.Waiting("Taking applications until the talent partner closes the list."); }
+    on CloseApplications { goto Screening; }
+  }
+  state Screening {
+    enter {
+      var read = await AssignedWork.Do(this.Item.Job, Agents.Of<HiringCoordinator>().For(this.Item.Partner), new ReadTheApplications(), this.Item,
+                                       key: "read", about: "The applications for " + this.Item.Title);
+      // The reading is about every candidate whose application was in it — the app says so, once.
+      AboutEveryCandidate(this.Item, read.Task);
+      if (NotYetRead(this.Item.Id) > 0) {
+        // An application no agent read is not an application nobody reads.
+        Processes.Problem(NotYetRead(this.Item.Id).ToString() + " of the applications could not be read by the agents, so the talent partner reads them by hand.");
+        goto ByHand;
+      }
+      goto Interviewing;
+    }
+  }
+  state ByHand {
+    subscribe ReadByHand();
+    enter { Processes.Waiting("Waiting for the talent partner to read what the agents could not."); }
+    on ReadByHand { goto Interviewing; }
+  }
+  state Interviewing {
+    enter {
+      Shortlisted(this.Item);
+      if (InTheRunning(this.Item.Id) == 0) {
+        this.Item.Note = "No application met what the role needs.";
+        goto NoHire;
+      }
+      // Every candidate is asked at once, each through a link of their own; the run waits for each answer in turn.
+      var asked = Workflow.Once("ask-the-candidates", () => AskTheCandidates(this.Item));
+      foreach (var request in asked) {
+        var answer = await Requests.Answer(HumanRequest.Single(r => r.Id == request));
+        KeepAvailability(request, answer);
+      }
+      // …and so is every interviewer, for the candidate they met.
+      var feedback = Workflow.Once("ask-the-interviewers", () => AskTheInterviewers(this.Item));
+      foreach (var request in feedback) {
+        var answer = await Requests.Answer(HumanRequest.Single(r => r.Id == request));
+        KeepFeedback(request, answer);
+      }
+      if (Interviewed(this.Item.Id) < 2) {
+        this.Item.Note = "Fewer than two candidates were interviewed.";
+        goto NoHire;
+      }
+      MeetInterviewed(this.Item);
+      goto Comparing;
+    }
+  }
+  state Comparing {
+    enter {
+      // The offer is the manager's to decide: the work is done for her, so what the coordinator proposes goes to her.
+      var compared = await AssignedWork.Do(this.Item.Job, Agents.Of<HiringCoordinator>().For(this.Item.Manager), new CompareTheCandidates(), this.Item,
+                                           key: "compare", about: "The candidates for " + this.Item.Title);
+      if (!compared.Done || !OfferMadeNow(this.Item.Id)) {
+        this.Item.Note = compared.Done ? "No offer was made." : "The candidates were not compared: " + compared.Problem;
+        goto NoHire;
+      }
+      KeepTheDecision(this.Item, compared.Result);
+      goto Offering;
+    }
+  }
+  state Offering {
+    enter {
+      var ask = Workflow.Once("offer", () => PutTheOffer(this.Item));
+      var answer = await Requests.Answer(ask);
+      if (!answer.Approved) {
+        this.Item.Note = answer.Rejected ? "The candidate declined: " + answer.Comment : "The candidate never answered: " + answer.ClosedWhy;
+        goto NoHire;
+      }
+      Accepted(this.Item, ask);
+      goto Hired;
+    }
+  }
+  on Withdraw { goto Withdrawn; }
+
+  terminal success Hired     { }
+  terminal cancel  NoHire    { Message = "nobody was hired"; }
+  terminal cancel  Withdrawn { Message = "the manager withdrew the hire"; }
+}
+
+/// A hire, for the people who follow it.
+public class HiringProcess : Process<Hire> {
+  public override string Name => "Hiring";
+  public override string Workflow => "Hiring";
+  public override string Purpose => "From a manager's request to an accepted offer.";
+  public override WorkflowGraph Graph => Hiring.Graph;
+  public override TimeSpan? StuckAfter => TimeSpan.FromDays(10);
+  public override string TitleOf(Hire h) => h.Title;
+  public override List<WorkflowAuditEntry> HistoryOf(Hire h) => Hiring.For(h).Audit;
+}
+
+// ── what the process asks, and keeps ────────────────────────────────────────────────────────────────────────────────
+
+[Server, Authorize(IsAuthenticated), OwnUnitOfWork]
+internal int NotYetRead(Guid hire) { return Applicant.Count(c => c.Hire.Id == hire && !c.Assessed && c.Standing == CandidateStanding.Applied); }
+// These two are asked right after the body itself changed the rows, so they count the rows as the body holds them.
+internal int InTheRunning(Guid hire) { return Applicant.Where(c => c.Hire.Id == hire).ToList().Count(c => c.Standing == CandidateStanding.Shortlisted); }
+internal int Interviewed(Guid hire) { return Applicant.Where(c => c.Hire.Id == hire).ToList().Count(c => c.Interviewed && c.Standing == CandidateStanding.Shortlisted); }
+[Server, Authorize(IsAuthenticated), OwnUnitOfWork]
+internal bool OfferMadeNow(Guid hire) { return Hire.Single(h => h.Id == hire).Offered != null; }
+
+/// Everybody whose application meets what the role needs is in the running; the others are told no.
+public void Shortlisted(Hire hire) {
+  foreach (var c in Applicant.Where(x => x.Hire == hire && x.Standing == CandidateStanding.Applied).ToList()) {
+    c.Standing = c.Meets ? CandidateStanding.Shortlisted : CandidateStanding.Declined;
+  }
+}
+
+/// Ask every candidate in the running when they can meet — each through a link of their own. Answers the requests.
+public List<Guid> AskTheCandidates(Hire hire) {
+  List<Guid> put = [];
+  foreach (var c in Applicant.Where(x => x.Hire == hire && x.Standing == CandidateStanding.Shortlisted).OrderBy(x => x.Name).ToList()) {
+    var ask = NewRequest.For<CandidateAvailability>();
+    ask.OutsideName = c.Name;
+    ask.OutsideEmail = c.Email;
+    ask.Title = "When could you meet us?";
+    ask.Context = "Tallis & Wren would like to interview you for " + hire.Title + ".";
+    ask.About = Subject.Of("Candidate", c.Id, c.Name);
+    ask.Within = TimeSpan.FromDays(4);
+    ask.ExpireAfter = TimeSpan.FromDays(10);
+    ask.AskedByName = "Hiring";
+    put.Add(AssignmentRequests.Ask(hire.Job, ask, key: "availability-" + c.Id.ToString()).Id);
+  }
+  return put;
+}
+
+/// What a candidate answered — or that they are no longer in the running.
+public void KeepAvailability(Guid request, RequestOutcome answer) {
+  var r = HumanRequest.Single(x => x.Id == request);
+  var c = Applicant.Single(x => x.Id == r.SubjectId);
+  if (!answer.Answered) {
+    if (c.Standing == CandidateStanding.Shortlisted) { c.Standing = CandidateStanding.Declined; }
+    return;
+  }
+  var said = answer.As<CandidateAvailability>();
+  c.Availability = said.CouldMeet;
+  c.CanStart = said.CanStart;
+}
+
+/// Ask an interviewer for their feedback on each candidate still in the running — one interviewer a candidate, in
+/// turn; a request nobody answers in two days goes on to the other interviewer.
+public List<Guid> AskTheInterviewers(Hire hire) {
+  List<Guid> put = [];
+  var interviewers = AssignmentParticipant.Where(p => p.Assignment == hire.Job && p.Role == ParticipantRole.Contributor).OrderBy(p => p.Person.DisplayName).ToList()
+    .Select(p => p.Person).ToList();
+  if (interviewers.Count == 0) { return put; }
+  var turn = 0;
+  foreach (var c in Applicant.Where(x => x.Hire == hire && x.Standing == CandidateStanding.Shortlisted).OrderByDescending(x => x.Name).ToList()) {
+    var ask = NewRequest.For<InterviewFeedback>();
+    ask.To = interviewers[turn % interviewers.Count];
+    ask.EscalateTo = interviewers.Count > 1 ? interviewers[(turn + 1) % interviewers.Count] : null;
+    ask.Title = "Your feedback on " + c.Name;
+    ask.Context = "For " + hire.Title + ". The role needs: " + hire.MustHave;
+    ask.About = Subject.Of("Candidate", c.Id, c.Name);
+    ask.Within = TimeSpan.FromDays(2);
+    ask.ExpireAfter = TimeSpan.FromDays(9);
+    ask.AskedByName = "Hiring";
+    put.Add(AssignmentRequests.Ask(hire.Job, ask, key: "feedback-" + c.Id.ToString()).Id);
+    turn = turn + 1;
+  }
+  return put;
+}
+
+/// The manager's request, as the hire's first item; the people and the agents put on the job; and the process started.
+public Hire AskForAHire(string title, decimal floor, decimal ceiling, string asked, Person partner, List<Person> interviewers) {
+  var mine = Security.CurrentUserId;
+  var manager = Person.Single(p => p.Id == mine);
+  var job = OpenAssignment(new NewAssignment {
+    Title = "Hire: " + title, Goal = "Somebody has accepted our offer for this role.",
+    Scope = "This role, within the salary range the manager gave.",
+    Owner = partner, Assignees = [Agents.Of<HiringCoordinator>().Actor, Agents.Of<ApplicationReader>().Actor],
+    Budget = 0.20m, Process = "hiring", ProcessVersion = "1",
+  });
+  AddCriterion(job, "The role is clear", key: "role");
+  AddCriterion(job, "Two candidates have been interviewed", key: "interviewed");
+  AddCriterion(job, "An offer is accepted", key: "accepted");
+  foreach (var who in interviewers) { AddParticipant(job, who, ParticipantRole.Contributor); }
+  AddItem(job, new NewItem { Kind = ItemKind.Input, Key = "request", Title = "The manager's request", Content = asked,
+                             Source = new ItemSource { From = manager.DisplayName } });
+  // What an interviewer or a reader thought of a candidate is read by fewer people: the manager, the talent partner,
+  // and the coordinator's own account, which compares the candidates from it.
+  OpenKindTo(job, ItemKind.Finding, manager);
+  OpenKindTo(job, ItemKind.Finding, partner);
+  OpenKindTo(job, ItemKind.Finding, Agents.Of<HiringCoordinator>().Actor);
+  var hire = new Hire { Title = title, Manager = manager, Partner = partner, Job = job, SalaryFloor = floor, SalaryCeiling = ceiling, Asked = asked };
+  UnitOfWork.Commit();
+  Workflow.Run(hire);
+  return hire;
+}
+
+/// The talent partner stops taking applications.
+public void CloseTheList(Hire hire) { Hiring.RaiseCloseApplications(hire); }
+
+/// The talent partner reads an application the agents could not, and — when none is left unread — the hire goes on.
+public void ReadByHandAs(Applicant candidate, bool meets, string why) {
+  Assess(candidate, meets, why, "Read by hand by " + Session.CurrentUser!.DisplayName);
+  UnitOfWork.Commit();
+  if (NotYetRead(candidate.Hire.Id) == 0) { Hiring.RaiseReadByHand(candidate.Hire); }
+}
+
+/// The manager no longer wants the hire.
+public void WithdrawTheHire(Hire hire) { Hiring.RaiseWithdraw(hire); }
+
+public void MeetRoleIsClear(Hire h) {
+  var requirements = ItemOf(h.Job, "requirements");
+  if (requirements == null) { MeetCriterion(CriterionOf(h.Job, "role"), "Taken as the manager wrote it."); }
+  else { MeetWith(CriterionOf(h.Job, "role"), requirements!, "Written down from the manager's request and her answer"); }
+}
+
+public void MeetInterviewed(Hire h) {
+  MeetCriterion(CriterionOf(h.Job, "interviewed"), Interviewed(h.Id).ToString() + " candidates were interviewed, and the feedback is on file.");
+}
+
+/// The decision, as an item of the hire: who, at what salary, and why.
+public void KeepTheDecision(Hire h, Comparison compared) {
+  var offered = Hire.Single(x => x.Id == h.Id).Offered!;
+  var decision = AddItem(h.Job, new NewItem { Kind = ItemKind.Decision, Key = "decision", Title = "The offer goes to " + offered.Name,
+                                              Content = compared.Why, Source = new ItemSource { From = "The comparison, approved by " + h.Manager.DisplayName } });
+  MarkItemAbout(decision, Whose(offered));
+}
+
+/// The offer, put to the candidate through a link: a yes or a no to exactly this.
+public HumanRequest PutTheOffer(Hire h) {
+  var hire = Hire.Single(x => x.Id == h.Id);
+  var c = hire.Offered!;
+  return AssignmentRequests.Ask(hire.Job, new NewRequest {
+    Kind = Osysharp.HumanRequests.RequestKind.Approval, OutsideName = c.Name, OutsideEmail = c.Email,
+    Title = "Our offer: " + hire.Title,
+    Context = "We would like you to join Tallis & Wren.",
+    Facts = [new RequestFact("Salary", hire.OfferSalary.ToString("0") + " kr a month"), new RequestFact("Start", hire.StartBy)],
+    About = Subject.Of("Hire", hire.Id, hire.Title, version: c.Name + " at " + hire.OfferSalary.ToString("0")),
+    Within = TimeSpan.FromDays(5), ExpireAfter = TimeSpan.FromDays(14), AskedByName = "Hiring",
+  }, key: "offer");
+}
+
+/// The candidate said yes: they are hired, the last criterion is met by their own answer, and the job is done.
+public void Accepted(Hire h, HumanRequest offer) {
+  var hire = Hire.Single(x => x.Id == h.Id);
+  var c = hire.Offered!;
+  c.Standing = CandidateStanding.Hired;
+  MeetCriterion(CriterionOf(hire.Job, "accepted"), c.Name + " accepted the offer.", offer.Id, "HumanRequest");
+  CompleteAssignment(hire.Job, c.Name + " joins at " + hire.OfferSalary.ToString("0") + " kr a month, starting " + hire.StartBy + ".");
+}
+
+// ── what the firm hears, and sends ──────────────────────────────────────────────────────────────────────────────────
+
+/// Something the firm was told or "sent", so a test can read what happened.
+entity Heard {
+  [Required, MaxLength(40)] string What;
+  [MaxLength(200)] string To = "";
+  [MaxLength(300)] string Title = "";
+  [MaxLength(4000)] string About = "";
+  security { allow read, create when IsAuthenticated || IsAnonymous; }
+}
+
+/// The mail the firm "sends": the link for somebody with no account, by who it was sent to.
+[On] void MailTheLink(HumanRequestPut e) {
+  if (e.Request.OutsideEmail != "") { new Heard { What = "mailed", To = e.Request.OutsideEmail, Title = e.Request.Title, About = AnswerLinkFor(e.Request) }; }
+}
+
+[AuthMethod]
+string SignInWithCode(string email, string code) {
+  var p = Person.FirstOrDefault(x => x.Email == NormalisedEmail(email));
+  if (p == null || !p.IsActive) { Security.VerifyPassword(code); return ""; }
+  if (!Security.VerifyPassword(code, p.CodeHash)) { return ""; }
+  return Security.IssueJwt(p.Id, p.Email);
+}
+
+app.AuthBootstrap = new AuthBootstrap { Role = FirmRole.Authenticator, Login = SignInWithCode };
+app.Auth = new PasswordAuth { LoginField = Email, PasswordField = CodeHash };
+app.Audit = new AuditConfig { Redact = new AuditRedaction { Properties = [Staffing.Person.CodeHash] } };
+
+// ── candidates: what they send, what is thought of them, and whose data it is ───────────────────────────────────────
+
+/// The candidate as a privacy request finds them: by the address they wrote from.
+public DataSubject Whose(Applicant c) { return new DataSubject { Emails = [c.Email] }; }
+
+/// An application arrives. What was sent is an item of the hire, and the firm says whose data it is.
+public Applicant TakeApplication(Hire hire, string name, string email, string text) {
+  var c = new Applicant { Hire = hire, Name = name, Email = email };
+  UnitOfWork.Commit();
+  var item = AddItem(hire.Job, new NewItem { Kind = ItemKind.Document, Key = "application-" + c.Id.ToString(), Title = "Application: " + name,
+                                             Content = text, Source = new ItemSource { From = name + "'s mail" } });
+  MarkItemAbout(item, Whose(c));
+  return c;
+}
+
+/// How an application stands against what the role needs — on the candidate, and as a finding of the hire.
+public void Assess(Applicant c, bool meets, string why, string how) {
+  c.Assessed = true;
+  c.Meets = meets;
+  c.AssessedWhy = why;
+  var item = AddItem(c.Hire.Job, new NewItem { Kind = ItemKind.Finding, Key = "assessment-" + c.Id.ToString(),
+                                               Title = (meets ? "Meets what the role needs: " : "Does not meet what the role needs: ") + c.Name,
+                                               Content = why, Source = new ItemSource { From = how } });
+  MarkItemAbout(item, Whose(c));
+}
+
+/// A piece of an agent's work that read every application is about every candidate.
+public void AboutEveryCandidate(Hire hire, Guid task) {
+  foreach (var c in Applicant.Where(x => x.Hire == hire).ToList()) { MarkAgentWorkAbout(task, Whose(c)); }
+}
+
+/// What an interviewer answered: on the candidate, and as a finding of the hire that fewer people read.
+public void KeepFeedback(Guid request, RequestOutcome answer) {
+  var r = HumanRequest.Single(x => x.Id == request);
+  var c = Applicant.Single(x => x.Id == r.SubjectId);
+  if (!answer.Answered || c.Standing != CandidateStanding.Shortlisted) { return; }
+  var said = answer.As<InterviewFeedback>();
+  c.Interviewed = true;
+  c.ClientReady = said.ClientReady;
+  var item = AddItem(c.Hire.Job, new NewItem { Kind = ItemKind.Finding, Key = "feedback-" + c.Id.ToString(), Title = answer.ByName + " on " + c.Name,
+                                               Content = said.Saw + (said.ClientReady ? " Ready for a client in the first month." : " Not ready for a client in the first month."),
+                                               Source = new ItemSource { From = "An interview with " + c.Name } });
+  MarkItemAbout(item, Whose(c));
+}
+
+/// A candidate says they no longer want the role: they are out of the running, and what was still asked of them is
+/// called off — so the hire stops waiting for them.
+public void CandidateWithdraws(Applicant c) {
+  c.Standing = CandidateStanding.Withdrawn;
+  UnitOfWork.Commit();
+  foreach (var r in HumanRequest.Where(x => x.SubjectId == c.Id && x.Status == RequestStatus.Open).ToList()) {
+    CancelRequest(r, "The candidate withdrew.");
+  }
+}
+
+/// ⭐ WHAT THE FIRM'S OWN RECORDS HOLD ABOUT A CANDIDATE — the app's holder. Nobody wires it: the privacy kit finds it.
+/// What the hire's repository, the agents' work and the requests hold about them is each kit's own to answer for.
+public class CandidatesPersonalData : IPersonalDataHolder {
+  public string Key() => "Staffing.Candidates";
+
+  public List<DataCategory> Categories() => [
+    new DataCategory {
+      Key = "staffing.candidates", Label = "That you applied to us: your name and address, how your application stood, and when you could meet and start",
+      Purpose = "Filling a role", SubjectKind = "people who applied for a role", Basis = RetentionBasis.Contract,
+      BasisDetail = "steps taken at your request before a contract", Identifies = true },
+  ];
+
+  public int Count(DataSubject s, DataCategory c) { return Applicant.Count(x => s.Emails.Contains(x.Email)); }
+
+  /// The row stays, so the hire still says how many applied and how each application ended; who it was is gone.
+  public void Erase(DataSubject s, DataCategory c) {
+    foreach (var x in Applicant.Where(x => s.Emails.Contains(x.Email)).ToList()) {
+      x.Name = "A candidate who asked to be erased";
+      x.Email = "";
+      x.AssessedWhy = "";
+      x.Availability = "";
+      x.CanStart = "";
+    }
+  }
+
+  public ExportSection Export(DataSubject s, DataCategory c) {
+    List<ExportItem> items = [];
+    foreach (var x in Applicant.Where(x => s.Emails.Contains(x.Email)).ToList()) {
+      items.Add(new ExportItem { Title = "Your application for " + x.Hire.Title, Body = x.AssessedWhy,
+                                 Fields = [new ExportField { Name = "Where it stands", Value = x.Standing.Name },
+                                           new ExportField { Name = "You could meet", Value = x.Availability },
+                                           new ExportField { Name = "You could start", Value = x.CanStart }] });
+    }
+    return new ExportSection { Category = c.Key, Json = "[]", Items = items };
+  }
+}
