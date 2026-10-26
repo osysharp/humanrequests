@@ -18,8 +18,8 @@
 //
 // ⚑ THE LINE OPENS THE REQUEST, as whoever is looking may read it: the question, the answer, and when.
 package Osysharp.HumanRequests.Processes {
-  version     "1.1.0";
-  minPlatform "0.14.0";
+  version     "1.2.0";
+  minPlatform "0.17.0";
   summary     "people inside business processes: each request a workflow's run puts to a person — a question, an approval, a form, a link sent to somebody outside — is told on that run in the state that put it: who was asked, that its date passed and whom it went on to, who answered and after how long, or that nobody did; and each line opens the request in place.";
   completes   Osysharp.HumanRequests@1, Osysharp.Processes@1;
 

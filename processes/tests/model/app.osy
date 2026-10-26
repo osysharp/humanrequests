@@ -417,12 +417,12 @@ public class HiringProcess : Process<Hire> {
 
 // ── what the process asks, and keeps ────────────────────────────────────────────────────────────────────────────────
 
-[Server, Authorize(IsAuthenticated), OwnUnitOfWork]
+[Server, Authorize(IsAuthenticated), CommitsAlone]
 internal int NotYetRead(Guid hire) { return Applicant.Count(c => c.Hire.Id == hire && !c.Assessed && c.Standing == CandidateStanding.Applied); }
 // These two are asked right after the body itself changed the rows, so they count the rows as the body holds them.
 internal int InTheRunning(Guid hire) { return Applicant.Where(c => c.Hire.Id == hire).ToList().Count(c => c.Standing == CandidateStanding.Shortlisted); }
 internal int Interviewed(Guid hire) { return Applicant.Where(c => c.Hire.Id == hire).ToList().Count(c => c.Interviewed && c.Standing == CandidateStanding.Shortlisted); }
-[Server, Authorize(IsAuthenticated), OwnUnitOfWork]
+[Server, Authorize(IsAuthenticated), CommitsAlone]
 internal bool OfferMadeNow(Guid hire) { return Hire.Single(h => h.Id == hire).Offered != null; }
 
 /// Everybody whose application meets what the role needs is in the running; the others are told no.
