@@ -93,3 +93,101 @@ screens driven as a person (`osy test --pixels` photographs them wide and on a p
 - Package: `Osysharp.HumanRequests` · needs `Osysharp.WorkQueues`, `Osysharp.Identity`, `Osysharp.Workflow`,
   `Osysharp.ServiceHours`, `Osysharp.Ui`.
 - Reference: `osy docs agent-human-requests`.
+
+## Examples
+
+Taken from this package's own tests, which compile and run on every release.
+
+```osy
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+using Osysharp.HumanRequests;
+using Osysharp.Workflow;
+using Boatyard;
+
+[Test(Yard)]
+void an_approval_says_what_it_is_of_and_which_version_was_shown() {
+  runas (Edvin) {
+    var request = AskApproval(KeelBolts(), PersonNamed("Marit"));
+    Assert.Equal(RequestKind.Approval, request.Asks);
+    Assert.Equal("Quote", request.SubjectType);
+    Assert.Equal(KeelBolts().Id, request.SubjectId);
+    Assert.Equal("Replace the keel bolts on Tern", request.SubjectLabel);
+    Assert.Equal("r1", request.SubjectVersion);
+    // What she is shown beside it, and the two answers an approval always offers.
+    var facts = JsonSerializer.Deserialize<List<RequestFact>>(request.FactsJson);
+    Assert.Equal(["Amount: 4800.00 EUR", "Revision: 1"], facts.Select(f => f.Label + ": " + f.Value).ToList());
+    var options = JsonSerializer.Deserialize<List<RequestOption>>(request.OptionsJson);
+    Assert.Equal(["approve:Approve", "reject:Reject"], options.Select(o => o.Key + ":" + o.Label).ToList());
+    // An approval of nothing in particular is refused when it is put.
+    var bare = Assert.Throws<ValidationException>(() => PutRequest(new NewRequest { Kind = RequestKind.Approval, To = PersonNamed("Marit"), Title = "OK?" }));
+    Assert.Contains("An approval is of one exact thing", bare.Message);
+  }
+}
+```
+
+From [`tests/approvals.test.osy`](tests/approvals.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+using Osysharp.HumanRequests;
+using Osysharp.Workflow;
+using Boatyard;
+
+[Test(Yard)]
+void a_request_sent_outside_is_answered_only_through_its_link() {
+  var link = PapersLink();
+  runas (Henrik) {
+    var request = HumanRequest.Single();
+    var refused = Assert.Throws<RequestRefused>(() => AnswerRequest(request, new RequestAnswer { Values = AinosPapers() }));
+    Assert.Equal("This request was sent to Aino Saarela, who answers it through the link they were sent.", refused.Message);
+    Assert.False(ViewRequest(request.Id)!.MayAnswer);
+  }
+  runas (Edvin) {
+    var inside = AskWhichSlip(Tern(), PersonNamed("Marit"));
+    var none = Assert.Throws<RequestRefused>(() => AnswerLinkFor(inside));
+    Assert.Contains("A link is for a request with an `OutsideEmail`", none.Message);
+  }
+  // Only whoever asked, or whoever oversees requests, is handed the link.
+  runas (Marit) { Assert.Equal(0, HumanRequest.Count(r => r.OutsideEmail != "")); }
+}
+```
+
+From [`tests/links.test.osy`](tests/links.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+using Osysharp.HumanRequests;
+using Osysharp.Workflow;
+using Boatyard;
+
+[Test(Yard)]
+void an_answer_that_was_not_offered_or_lacks_its_reason_is_refused_in_words() {
+  Guid id = Guid.Empty;
+  runas (Joel) { id = AskWhichSlip(Tern(), PersonNamed("Edvin")).Id; }
+  runas (Edvin) {
+    var none = Assert.Throws<ValidationException>(() => AnswerRequest(TheRequest(id), RequestAnswer.Choose("dry-dock")));
+    Assert.Equal("Choose one of: North slip, South slip, Keep her afloat.", none.Message);
+    var bare = Assert.Throws<ValidationException>(() => AnswerRequest(TheRequest(id), RequestAnswer.Choose("keep-her-afloat")));
+    Assert.Equal("“Keep her afloat” needs a word of explanation.", bare.Message);
+    Assert.Equal(RequestStatus.Open, TheRequest(id).Status);
+    Assert.True(AnswerRequest(TheRequest(id), RequestAnswer.Choose("keep-her-afloat", "The north slip's cradle is out for welding.")).Applied);
+  }
+  runas (Joel) { Assert.Equal("The north slip's cradle is out for welding.", OutcomeOf(TheRequest(id)).Comment); }
+}
+```
+
+From [`tests/requests.test.osy`](tests/requests.test.osy).
+
+## Learn more
+
+- [The Osysharp.HumanRequests reference](https://osysharp.com/reference/agent/kit-human-requests/)
+- [Osysharp.HumanRequests in the package catalogue](https://osysharp.com/packages/#osysharp-humanrequests)
+- [The Osy# reference](https://osysharp.com/reference/) — the language, the runtime and every kit
+- [`llms-full.txt`](https://osysharp.com/llms-full.txt) — the whole reference and specification as one Markdown file, for a coding agent
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE).

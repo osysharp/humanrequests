@@ -25,7 +25,7 @@ void Yard() {
   new OrganizationTier { Name = "Standard", Rank = 1, IsDefault = true };
 
   // The yard works weekdays, eight to four, Stockholm time.
-  var hours = new ServiceHours { Name = "Yard hours", Zone = Zone.Of("Europe/Stockholm") };
+  var hours = new ServiceHours { Name = "Yard hours", Zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/Stockholm") };
   foreach (var d in new List<DayOfWeek> { DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday }) {
     new ServiceWindow { ServiceHours = hours, Day = d, Start = TimeSpan.FromHours(8), End = TimeSpan.FromHours(16) };
   }
