@@ -84,3 +84,105 @@ osy test kits/human-requests-processes/tests --pixels   # the same in a real bro
   `Osysharp.HumanRequests@1` and `Osysharp.Processes@1`
 - Source: [`kits/human-requests-processes`](.) — `model/Bridge.osy`
 - Uses [`Osysharp.HumanRequests`](../human-requests), [`Osysharp.Processes`](../processes) and `Osysharp.Ui`.
+
+## Examples
+
+Taken from this package's own tests, which compile and run on every release.
+
+```osy
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+using Osysharp.HumanRequests;
+using Osysharp.Assignments;
+using Osysharp.Assignments.WorkQueues;
+using Osysharp.Assignments.Agents;
+using Osysharp.WorkRepositories;
+using Osysharp.WorkRepositories.Agents;
+using Osysharp.Llm;
+using Osysharp.Agents;
+using Osysharp.Agents.Testing;
+using Osysharp.Agents.HumanRequests;
+using Osysharp.Agents.Inspector;
+using Osysharp.Agents.Processes;
+using Osysharp.Processes;
+using Osysharp.Workflow;
+using Osysharp.Privacy;
+using Osysharp.HumanRequests.Processes;
+using Staffing;
+
+[Test(Firm)]
+void a_candidate_who_is_erased_is_gone_from_what_was_asked_of_him_too() {
+  var hire = TheHireUntilTheInterviews();
+  TheHireFromTheInterviews(hire);
+  runas (Noor) {
+    Assert.Equal(0, HumanRequest.Count(r => r.OutsideEmail == "tomas@reyes.example" || r.OutsideName == "Tomas Reyes" || r.SubjectLabel == "Tomas Reyes"));
+    var view = ProcessRunOf(ProcessRunAbout("Hiring", hire)!.Id)!;
+    Assert.False(view.Stays[4].Moments.Any(m => m.Said.Contains("Tomas")));
+    // The request is still there, called off, with what is left of it.
+    var his = HumanRequest.Single(r => r.ErasedAt != null);
+    Assert.Equal(RequestStatus.Cancelled, his.Status);
+    Assert.Equal("When could you meet us?", his.Title);
+    Assert.Contains("Somebody was asked something here who has since asked to be erased.", view.Stays[4].Moments.Select(m => m.Said).ToList());
+  }
+}
+```
+
+From [`tests/hire.test.osy`](tests/hire.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.WorkQueues;
+using Osysharp.HumanRequests;
+using Osysharp.Assignments;
+using Osysharp.WorkRepositories;
+using Osysharp.Llm;
+using Osysharp.Agents;
+using Osysharp.Agents.Testing;
+using Osysharp.Agents.HumanRequests;
+using Osysharp.Agents.Inspector;
+using Osysharp.Processes;
+using Osysharp.Workflow;
+using Staffing;
+
+[Test(Firm)]
+void the_coordinators_comparison_is_opened_with_the_offer_that_was_refused() {
+  var hire = TheHireUntilTheInterviews();
+  TheHireFromTheInterviews(hire);
+  Guid work = Guid.Empty;
+  runas (Noor) { work = AgentTask.Single(t => t.RunItem == hire && t.RunState == "Comparing" && t.Parent == null).Id; }
+
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Noor);
+  Ui.Visit("/work/" + work + "/0");
+  Assert.Visible("The candidates for Senior implementation consultant");
+  Assert.Visible("Petra cannot start before August. We need somebody by 1 June.");
+  // What it was given reads as it was written — the dash in the salary range as a dash.
+  Assert.Visible("62000–70000 kr a month, to start by 1 June.");
+  Assert.NoOverflow();
+  Ui.Shot("hire-work-wide-light");
+  Ui.Theme("dark");
+  Ui.Shot("hire-work-wide-dark");
+  Ui.Theme("light");
+
+  Ui.Viewport(390, 844);
+  Ui.Visit("/work/" + work + "/0");
+  Assert.Visible("The candidates for Senior implementation consultant");
+  Assert.NoOverflow();
+  Ui.Shot("hire-work-phone-light");
+  Ui.Theme("dark");
+  Ui.Shot("hire-work-phone-dark");
+}
+```
+
+From [`tests/hire-ui.test.osy`](tests/hire-ui.test.osy).
+
+## Learn more
+
+- [The Osysharp.HumanRequests.Processes reference](https://osysharp.com/reference/agent/kit-human-requests-processes/)
+- [Osysharp.HumanRequests.Processes in the package catalogue](https://osysharp.com/packages/#osysharp-humanrequests-processes)
+- [The Osy# reference](https://osysharp.com/reference/) — the language, the runtime and every kit
+- [`llms-full.txt`](https://osysharp.com/llms-full.txt) — the whole reference and specification as one Markdown file, for a coding agent
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE).
