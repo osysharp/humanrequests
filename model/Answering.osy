@@ -20,6 +20,8 @@ public class RequestAnswer {
   public static RequestAnswer Approve(string comment = "") { return new RequestAnswer { Choice = "approve", Comment = comment }; }
   public static RequestAnswer Reject(string why) { return new RequestAnswer { Choice = "reject", Comment = why }; }
   public static RequestAnswer Choose(string key, string comment = "") { return new RequestAnswer { Choice = key, Comment = comment }; }
+  /// A step to take (`RequestKind.OwnerStep`): it was done.
+  public static RequestAnswer Done(string comment = "") { return new RequestAnswer { Choice = "done", Comment = comment }; }
   /// In words, to a question that offers no options.
   public static RequestAnswer Say(string words) { return new RequestAnswer { Comment = words }; }
   /// The fields of a request for information, from the class they were asked for.
@@ -86,6 +88,15 @@ public AnswerResult AnswerRequest(HumanRequest request, RequestAnswer answer) {
   var person = me == null ? null : Principal.FirstOrDefault(p => p.Id == me);
   if (person == null) { throw new RequestRefused("A request is answered by a person: nobody is signed in."); }
   return RecordAnswer(request, answer, person, "", Assurance.SignedIn);
+}
+
+/// ⭐ TAKE WHAT WHOEVER ASKED RECOMMENDS — `AnswerRequest` with the recommended option, so it is refused exactly as
+/// that is: by anybody it is not put to, by whoever asked, and with no `comment` when the option needs one. Refused
+/// when the request recommends nothing.
+[Server, Authorize(IsAuthenticated)]
+public AnswerResult AcceptRecommendation(HumanRequest request, string comment = "") {
+  if (request.RecommendedOption == "") { throw new RequestRefused("This request recommends none of its options: choose one."); }
+  return AnswerRequest(request, new RequestAnswer { Choice = request.RecommendedOption, Comment = comment });
 }
 
 /// ⭐ ANSWER THROUGH THE LINK that was sent to somebody with no account. The link opens the one request it was made

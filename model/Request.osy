@@ -13,6 +13,9 @@ public enum RequestKind {
   [Label("Approval")] Approval,
   /// Facts only they have: the fields of a class the asker declares.
   [Label("Information")] Information,
+  /// A step only they can take — the exact thing to do (`Step`), where (`Where`), and how to tell it worked
+  /// (`Check`) — answered with Done.
+  [Label("A step to take")] OwnerStep,
 }
 
 /// Where a request stands. ⚠ Appended, never inserted.
@@ -104,6 +107,13 @@ public entity HumanRequest : WorkItem {
   [Immutable] string FieldsJson = "[]";
   /// The class the answer is read as (`RequestOutcome.As<T>()`), by its full name. "": none.
   [Immutable, MaxLength(200)] string AnswerType = "";
+  /// The option whoever asked recommends, by its `Key`, and why. "": they recommend none.
+  [Immutable, MaxLength(200)] string RecommendedOption = "";
+  [Immutable, MaxLength(2000)] string RecommendationWhy = "";
+  /// A step to take (`RequestKind.OwnerStep`): what to do, where, and how to tell it worked. "": not a step.
+  [Immutable, MaxLength(2000)] string Step = "";
+  [Immutable, MaxLength(300)] string StepWhere = "";
+  [Immutable, MaxLength(1000)] string StepCheck = "";
 
   // ── time ──
   /// The hours its time is counted in. None: around the clock.
@@ -272,6 +282,12 @@ public class RequestOption {
   public bool Grave = false;
   /// Choosing it needs a word of explanation.
   public bool NeedsComment = false;
+  /// What choosing it sets going, what speaks for it, what it costs, and who does it then — each shown under the
+  /// option, so the person weighs the options and not only their names. "": not said.
+  public string WhatHappens = "";
+  public string For = "";
+  public string Against = "";
+  public string WhoActs = "";
 
   /// An option whose key is its label in lower case with dashes: `RequestOption.Of("Send a replacement")`.
   public static RequestOption Of(string label, bool grave = false, bool needsComment = false) {
@@ -349,6 +365,16 @@ public class NewRequest {
   /// The fields of a request for information — or leave them out and say the class: `NewRequest.For<Details>()`.
   public List<RequestField> Fields = [];
   public string AnswerType = "";
+  /// The option whoever asks recommends — one of `Options` by its `Key` — and why. The person may take it with one
+  /// press (`AcceptRecommendation`) or choose another.
+  public string RecommendedOption = "";
+  public string RecommendationWhy = "";
+
+  /// A step to take (`RequestKind.OwnerStep`): the exact thing to do, where it is done, and how to tell it worked.
+  /// It offers no options: it is answered Done.
+  public string Step = "";
+  public string Where = "";
+  public string Check = "";
 
   /// What it is about — with the version shown, for an approval.
   public Subject? About;
@@ -385,7 +411,8 @@ public class NewRequest {
 
 /// The key every request carries as its kind in the work queue — what a bulk action is told the picked items share.
 public string RequestKindKey(RequestKind kind) {
-  return kind == RequestKind.Approval ? "request.approval" : kind == RequestKind.Information ? "request.information" : "request.question";
+  return kind == RequestKind.Approval ? "request.approval" : kind == RequestKind.Information ? "request.information"
+       : kind == RequestKind.OwnerStep ? "request.step" : "request.question";
 }
 
 // ── fields from a class ─────────────────────────────────────────────────────────────────────────────────────────────

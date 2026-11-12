@@ -63,6 +63,118 @@ void an_answer_that_was_not_offered_or_lacks_its_reason_is_refused_in_words() {
   runas (Joel) { Assert.Equal("The north slip's cradle is out for welding.", OutcomeOf(TheRequest(id)).Comment); }
 }
 
+// ── options that say what they lead to, and a recommendation ────────────────────────────────────────────────────────
+
+/// Which slip for Tern — each option saying what happens, what is for and against it, and who acts; the foreman's
+/// pick recommended, with why.
+HumanRequest AskWhichSlipWeighed(string recommended = "north-slip", string why = "The north slip is free from Tuesday.") {
+  return PutRequest(new NewRequest {
+    Kind = RequestKind.Question, To = PersonNamed("Edvin"), Title = "Which slip for Tern?",
+    Options = [
+      new RequestOption { Key = "north-slip", Label = "North slip", WhatHappens = "She is hauled out on Tuesday's tide.",
+                          For = "The cradle fits her keel.", Against = "The paint shed is at the far end.", WhoActs = "The yard crew" },
+      new RequestOption { Key = "south-slip", Label = "South slip", WhatHappens = "She waits for the slip to clear on Friday.",
+                          For = "Next to the paint shed.", Against = "Three days later.", WhoActs = "The yard crew" },
+    ],
+    RecommendedOption = recommended, RecommendationWhy = why,
+  });
+}
+
+[Test(Yard)]
+void options_say_what_happens_what_is_for_and_against_them_and_which_is_recommended() {
+  Guid id = Guid.Empty;
+  runas (Joel) { id = AskWhichSlipWeighed().Id; }
+  runas (Edvin) {
+    var view = ViewRequest(id)!;
+    Assert.Equal(["The cradle fits her keel.", "Next to the paint shed."], view.Options.Select(o => o.For).ToList());
+    Assert.Equal(["The paint shed is at the far end.", "Three days later."], view.Options.Select(o => o.Against).ToList());
+    Assert.Equal("She is hauled out on Tuesday's tide.", view.Options[0].WhatHappens);
+    Assert.Equal("The yard crew", view.Options[1].WhoActs);
+    Assert.Equal("north-slip", view.RecommendedOption);
+    Assert.Equal("The north slip is free from Tuesday.", view.RecommendationWhy);
+  }
+}
+
+[Test(Yard)]
+[runas(Joel)]
+void a_recommendation_names_one_of_the_options_offered() {
+  var wrong = Assert.Throws<ValidationException>(() => AskWhichSlipWeighed(recommended: "dry-dock"));
+  Assert.Equal("The recommendation names “dry-dock”, which is not one of its options: north-slip, south-slip.", wrong.Message);
+  var none = Assert.Throws<ValidationException>(() => PutRequest(new NewRequest { Title = "Who has the key?", RecommendedOption = "me" }));
+  Assert.Equal("This request offers no options, so it cannot recommend one.", none.Message);
+  var bare = Assert.Throws<ValidationException>(() => AskWhichSlipWeighed(recommended: ""));
+  Assert.Contains("goes with a recommendation", bare.Message);
+  Assert.Equal(0, HumanRequest.Count());
+}
+
+[Test(Yard)]
+void accepting_the_recommendation_answers_with_the_recommended_option_as_whoever_it_is_put_to() {
+  Guid id = Guid.Empty;
+  Guid plain = Guid.Empty;
+  runas (Joel) {
+    id = AskWhichSlipWeighed(recommended: "south-slip", why: "Paint first.").Id;
+    plain = AskWhichSlip(Tern(), PersonNamed("Edvin")).Id;
+    // Whoever asked may not answer it by accepting their own recommendation.
+    var own = Assert.Throws<RequestRefused>(() => AcceptRecommendation(TheRequest(id)));
+    Assert.StartsWith("You asked this, so it is not yours to answer.", own.Message);
+  }
+  runas (Edvin) {
+    var nothing = Assert.Throws<RequestRefused>(() => AcceptRecommendation(TheRequest(plain)));
+    Assert.Equal("This request recommends none of its options: choose one.", nothing.Message);
+    Assert.True(AcceptRecommendation(TheRequest(id)).Applied);
+    Workflow.Settle(TheRequest(id));
+  }
+  runas (Joel) {
+    var outcome = OutcomeOf(TheRequest(id));
+    Assert.True(outcome.Answered);
+    Assert.Equal("south-slip", outcome.Choice);
+    Assert.Equal("Edvin Strand", outcome.ByName);
+  }
+}
+
+// ── a step to take ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+HumanRequest AskToUnlockTheGate(List<RequestOption>? options = null, string step = "Unlock the slipway gate with the brass key.") {
+  return PutRequest(new NewRequest {
+    Kind = RequestKind.OwnerStep, To = PersonNamed("Edvin"), Title = "Open the slipway for Tern",
+    Step = step, Where = "The north slipway", Check = "The gate stands open and the winch has power.",
+    Options = options ?? [],
+  });
+}
+
+[Test(Yard)]
+void a_step_to_take_is_answered_done_and_closes() {
+  Guid id = Guid.Empty;
+  runas (Joel) {
+    var withOptions = Assert.Throws<ValidationException>(() => AskToUnlockTheGate(options: [RequestOption.Of("Later")]));
+    Assert.StartsWith("A step to take offers no options and no fields: it is answered Done.", withOptions.Message);
+    var empty = Assert.Throws<ValidationException>(() => AskToUnlockTheGate(step: "  "));
+    Assert.Equal("A step to take says the exact thing to do: its `Step`.", empty.Message);
+    var request = AskToUnlockTheGate();
+    Workflow.Settle(request);
+    id = request.Id;
+    Assert.Equal(RequestKind.OwnerStep, request.Asks);
+    Assert.Equal("request.step", request.Kind);
+  }
+  runas (Edvin) {
+    var view = ViewRequest(id)!;
+    Assert.Equal("Unlock the slipway gate with the brass key.", view.Step);
+    Assert.Equal("The north slipway", view.StepWhere);
+    Assert.Equal("The gate stands open and the winch has power.", view.StepCheck);
+    Assert.Equal(["Done"], view.Options.Select(o => o.Label).ToList());
+    Assert.True(AnswerRequest(TheRequest(id), RequestAnswer.Done()).Applied);
+    Workflow.Settle(TheRequest(id));
+  }
+  Background.Settle();
+  runas (Joel) {
+    var outcome = OutcomeOf(TheRequest(id));
+    Assert.True(outcome.StepTaken);
+    Assert.Equal(RequestStatus.Answered, TheRequest(id).Status);
+    Assert.Equal(Handling.Closed, TheRequest(id).Handling);
+    Assert.Equal("Done", ViewRequest(id)!.Answer);
+  }
+}
+
 // ── put to nobody by name ───────────────────────────────────────────────────────────────────────────────────────────
 
 [Test(Yard)]

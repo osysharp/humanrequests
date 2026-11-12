@@ -53,6 +53,7 @@ public component RequestSheet(Guid request, Action? onAnswered = null, bool titl
       if (view != null) {
         RequestHead(view, titled);
         if (view.Context != "" || view.Facts.Count > 0 || view.SubjectId != null) { RequestBody(view, changed: Load); }
+        if (view.Asks == RequestKind.OwnerStep) { RequestStep(view); }
         if (view.Status == RequestStatus.Open) {
           RequestTime(view);
           if (view.MayAnswer) {
@@ -91,7 +92,8 @@ public component RequestSkeleton() {
 /// Who asks, what is waiting on the answer — and the question, the biggest thing on the sheet.
 [Composable]
 public component RequestHead(RequestView view, bool titled = true) {
-  live var kind = view.Asks == RequestKind.Approval ? "asks for your approval" : view.Asks == RequestKind.Information ? "asks you for details" : "asks";
+  live var kind = view.Asks == RequestKind.Approval ? "asks for your approval" : view.Asks == RequestKind.Information ? "asks you for details"
+                : view.Asks == RequestKind.OwnerStep ? "asks you to take a step" : "asks";
   render {
     Stack(gap: 3) {
       Row(gap: 2, align: Align.Center, wrap: Wrapping.Wrap) {
@@ -135,6 +137,31 @@ public component RequestBody(RequestView view, bool withSubject = true, Action? 
         }
       }
       if (withSubject && view.SubjectId != null) { RequestSubject(view.SubjectType, view.SubjectId.Value, view.Id, Changed); }
+    }
+  }
+}
+
+/// A step to take: the exact thing to do, where it is done, and how to tell it worked.
+[Composable]
+public component RequestStep(RequestView view) {
+  render {
+    Stack(gap: 0, borderW: 1, border: Colors.Border, rounded: Radius.Lg, bg: Colors.Surface, label: "The step") {
+      Stack(gap: 1, px: 4, py: 3) {
+        Text("Do this", fontSize: FontSize.Label, color: Colors.TextMuted);
+        Text(view.Step, fontSize: FontSize.Body, fontWeight: FontWeight.Medium, whiteSpace: WhiteSpace.PreWrap, maxW: "62ch");
+      }
+      if (view.StepWhere != "") {
+        Stack(gap: 1, px: 4, py: 3) {
+          Text("Where", fontSize: FontSize.Label, color: Colors.TextMuted);
+          Text(view.StepWhere, fontSize: FontSize.Body);
+        }
+      }
+      if (view.StepCheck != "") {
+        Stack(gap: 1, px: 4, py: 3) {
+          Text("How to tell it worked", fontSize: FontSize.Label, color: Colors.TextMuted);
+          Text(view.StepCheck, fontSize: FontSize.Body, whiteSpace: WhiteSpace.PreWrap, maxW: "62ch");
+        }
+      }
     }
   }
 }
@@ -275,13 +302,43 @@ public component AnswerControls(RequestView view, Action<AnswerDraft> send, stri
       // ── options: a question, or an approval ──
       if (view.Options.Count > 0) {
         if (choosing == "") {
-          Row(gap: 2, wrap: Wrapping.Wrap, align: Align.Center) {
-            foreach (var option in view.Options) {
-              if (!option.Grave) { Button(option.Label, onPress: () => Pick(option), tone: OptionTone(view, option), size: Size.Lg); }
+          // What whoever asked recommends, and why — taken with one press.
+          foreach (var option in view.Options) {
+            if (option.Key == view.RecommendedOption) {
+              Stack(gap: 2, px: 4, py: 3, bg: Colors.Sunken, rounded: Radius.Lg, label: "Recommendation") {
+                Text("Recommended: " + option.Label, fontSize: FontSize.Body, fontWeight: FontWeight.Medium);
+                if (view.RecommendationWhy != "") {
+                  Text(view.RecommendationWhy, fontSize: FontSize.Label, color: Colors.TextSecondary, maxW: "62ch", lineHeight: "1.5", whiteSpace: WhiteSpace.PreWrap);
+                }
+                Row(gap: 2) { Button("Accept recommendation", onPress: () => Pick(option), tone: Tone.Primary); }
+              }
             }
-            Spacer();
-            foreach (var option in view.Options) {
-              if (option.Grave) { Button(option.Label, onPress: () => Pick(option), tone: Tone.Ghost, size: Size.Lg); }
+          }
+          if (OptionsExplained(view)) {
+            // Each option with what it sets going, what speaks for it and against it, and who acts then.
+            Stack(gap: 2, label: "Options") {
+              foreach (var option in view.Options) {
+                Stack(gap: 1, px: 4, py: 3, borderW: 1, border: Colors.Border, rounded: Radius.Lg, label: option.Label) {
+                  Row(gap: 2, align: Align.Center, wrap: Wrapping.Wrap) {
+                    Button(option.Label, onPress: () => Pick(option), tone: option.Grave ? Tone.Ghost : OptionTone(view, option));
+                    if (option.Key == view.RecommendedOption) { Badge("Recommended", tone: Tone.Success); }
+                  }
+                  if (option.WhatHappens != "") { OptionLine("What happens", option.WhatHappens); }
+                  if (option.For != "") { OptionLine("For", option.For); }
+                  if (option.Against != "") { OptionLine("Against", option.Against); }
+                  if (option.WhoActs != "") { OptionLine("Who acts", option.WhoActs); }
+                }
+              }
+            }
+          } else {
+            Row(gap: 2, wrap: Wrapping.Wrap, align: Align.Center) {
+              foreach (var option in view.Options) {
+                if (!option.Grave) { Button(option.Label, onPress: () => Pick(option), tone: OptionTone(view, option), size: Size.Lg); }
+              }
+              Spacer();
+              foreach (var option in view.Options) {
+                if (option.Grave) { Button(option.Label, onPress: () => Pick(option), tone: Tone.Ghost, size: Size.Lg); }
+              }
             }
           }
         } else {
@@ -354,8 +411,26 @@ public component AnswerField(RequestField field, Action<string, string> typed) {
   }
 }
 
-/// The first thing to say yes with is the sheet's one primary button; the rest are plain.
+/// One line under an option: "For", and what speaks for it.
+[Composable]
+public component OptionLine(string label, string text) {
+  render {
+    Row(gap: 2, align: Align.Baseline, wrap: Wrapping.Wrap) {
+      Text(label, fontSize: FontSize.Label, color: Colors.TextMuted, minW: "6.5rem");
+      Text(text, fontSize: FontSize.Label, color: Colors.TextSecondary, maxW: "56ch", lineHeight: "1.5");
+    }
+  }
+}
+
+/// Whether any option says what it sets going, what is for or against it, or who acts.
+bool OptionsExplained(RequestView view) {
+  return view.Options.Any(o => o.WhatHappens != "" || o.For != "" || o.Against != "" || o.WhoActs != "");
+}
+
+/// The option whoever asked recommends is the sheet's one primary button — else the first thing to say yes with; the
+/// rest are plain.
 Tone OptionTone(RequestView view, RequestOption option) {
+  if (view.RecommendedOption != "") { return option.Key == view.RecommendedOption ? Tone.Primary : Tone.Default; }
   return view.Options.Count > 0 && view.Options[0].Key == option.Key ? Tone.Primary : Tone.Default;
 }
 
@@ -414,6 +489,7 @@ public component ExternalAnswer(AnswerLink link) {
           }
           if (said == "") {
             RequestBody(view, withSubject: false);
+            if (view.Asks == RequestKind.OwnerStep) { RequestStep(view); }
             if (view.MayAnswer) {
               RequestTime(view);
               Field("Your name", value: name, hint: "Kept with your answer.");

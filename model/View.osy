@@ -36,6 +36,13 @@ public class RequestView {
   public List<RequestFact> Facts = [];
   public List<RequestOption> Options = [];
   public List<RequestField> Fields = [];
+  /// The option whoever asked recommends, by its key, and why. "": none.
+  public string RecommendedOption = "";
+  public string RecommendationWhy = "";
+  /// A step to take: what to do, where, and how to tell it worked.
+  public string Step = "";
+  public string StepWhere = "";
+  public string StepCheck = "";
   public DateTime AskedAt;
   /// When it is late — null: no date — and whether that has passed.
   public DateTime? DueAt;
@@ -107,6 +114,8 @@ RequestView ViewOf(HumanRequest request) {
     Facts = JsonSerializer.Deserialize<List<RequestFact>>(request.FactsJson),
     Options = JsonSerializer.Deserialize<List<RequestOption>>(request.OptionsJson),
     Fields = JsonSerializer.Deserialize<List<RequestField>>(request.FieldsJson),
+    RecommendedOption = request.RecommendedOption, RecommendationWhy = request.RecommendationWhy,
+    Step = request.Step, StepWhere = request.StepWhere, StepCheck = request.StepCheck,
     AskedAt = request.ArrivedAt, DueAt = request.DueAt, Late = request.OverdueAt != null && request.Status == RequestStatus.Open,
     Comment = request.Comment, AnsweredAt = request.AnsweredAt, ClosedWhy = request.ClosedWhy, Used = request.ActedAt != null,
     AnsweredBy = request.AnsweredBy != null ? NameOfPerson(request.AnsweredBy!) : request.AnsweredByName,

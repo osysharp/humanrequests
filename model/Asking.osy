@@ -41,10 +41,32 @@ public HumanRequest PutRequest(NewRequest ask) {
       throw new ValidationException("A request for information says which: `NewRequest.For<Details>()` asks for the members of a class, or list `Fields`.");
     }
     options = [];
+  } else if (ask.Kind == RequestKind.OwnerStep) {
+    if (options.Count > 0 || fields.Count > 0) {
+      throw new ValidationException("A step to take offers no options and no fields: it is answered Done. Say the step (`Step`), where (`Where`) and how to tell it worked (`Check`).");
+    }
+    if (ask.Step.Trim() == "") { throw new ValidationException("A step to take says the exact thing to do: its `Step`."); }
+    // Its one answer: the step was taken. What answers a question answers it too — and the run closes it the same way.
+    options = [new RequestOption { Key = DoneKey(), Label = App.Setting<RequestsSetup>().Words.Done() }];
   } else {
     fields = [];
     foreach (var o in options) {
       if (o.Key.Trim() == "" || o.Label.Trim() == "") { throw new ValidationException("An option has a `Key` — what the answer carries — and a `Label` the person reads."); }
+    }
+  }
+  if (ask.Kind != RequestKind.OwnerStep && (ask.Step.Trim() != "" || ask.Where.Trim() != "" || ask.Check.Trim() != "")) {
+    throw new ValidationException("Only a step to take (`RequestKind.OwnerStep`) has a `Step`, a `Where` and a `Check`.");
+  }
+  var recommended = ask.RecommendedOption.Trim();
+  if (recommended == "" && ask.RecommendationWhy.Trim() != "") {
+    throw new ValidationException("A `RecommendationWhy` goes with a recommendation: name the option recommended (`RecommendedOption`).");
+  }
+  if (recommended != "") {
+    if (ask.Kind == RequestKind.OwnerStep) { throw new ValidationException("A step to take has nothing to recommend: it is answered Done."); }
+    if (!options.Any(o => o.Key == recommended)) {
+      throw new ValidationException(options.Count == 0
+        ? "This request offers no options, so it cannot recommend one."
+        : $"The recommendation names “{recommended}”, which is not one of its options: " + string.Join(", ", options.Select(o => o.Key)) + ".");
     }
   }
 
@@ -66,6 +88,8 @@ public HumanRequest PutRequest(NewRequest ask) {
     To = ask.To, NotBy = ask.NotBy, OutsideName = Clip(ask.OutsideName.Trim(), 200), OutsideEmail = Clip(ask.OutsideEmail.Trim().ToLower(), 200),
     Context = Clip(ask.Context.Trim(), 8000), FactsJson = JsonSerializer.Serialize(ask.Facts),
     OptionsJson = JsonSerializer.Serialize(options), FieldsJson = JsonSerializer.Serialize(fields), AnswerType = ask.AnswerType,
+    RecommendedOption = Clip(recommended, 200), RecommendationWhy = Clip(ask.RecommendationWhy.Trim(), 2000),
+    Step = Clip(ask.Step.Trim(), 2000), StepWhere = Clip(ask.Where.Trim(), 300), StepCheck = Clip(ask.Check.Trim(), 1000),
     AnswerHours = ask.Hours, AnswerWithin = within, ExpireAfter = ask.ExpireAfter,
     RemindAfter = ask.RemindAfter ?? setup.RemindAfter, RemindEvery = ask.RemindEvery ?? setup.RemindEvery,
     MaxReminders = ask.MaxReminders ?? setup.MaxReminders, EscalateTo = ask.EscalateTo, Replaces = ask.Replaces,
@@ -96,6 +120,8 @@ public HumanRequest PutRequest(NewRequest ask) {
 /// What an approval's two answers carry.
 public string ApproveKey() { return "approve"; }
 public string RejectKey() { return "reject"; }
+/// What a step to take is answered with: it was done.
+public string DoneKey() { return "done"; }
 
 /// ⭐ WHAT CAME BACK — what `Requests.Answer` answers, and `OutcomeOf` reads at any time.
 public class RequestOutcome {
@@ -120,6 +146,8 @@ public class RequestOutcome {
   public bool Approved => Status == RequestStatus.Answered && Choice == "approve";
   /// An approval that was refused: `Comment` says why.
   public bool Rejected => Status == RequestStatus.Answered && Choice == "reject";
+  /// A step to take that was taken.
+  public bool StepTaken => Status == RequestStatus.Answered && Choice == "done";
 
   /// The fields of a request for information, as the class they were asked for.
   public T As<T>() { return JsonSerializer.Deserialize<T>(AnswerJson); }

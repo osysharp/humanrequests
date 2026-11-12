@@ -10,7 +10,9 @@
 //     if (answer.Approved) { UseApproval(request, order.Revision); Refund(order); }
 //
 // ⚑ FOUR KINDS, ONE ROW: a question with the options it may be answered with, an approval of one exact thing, a
-//   request for information (the fields of a class you declare), a request for a document. Whoever asked — a person,
+//   request for information (the fields of a class you declare), a request for a document — and a step to take,
+//   answered Done. An option may say what it leads to, what is for and against it, and who acts; one may be
+//   recommended, and taken with a press (`AcceptRecommendation`). Whoever asked — a person,
 //   a process, an agent — what it is about and the version of that which was shown, the deadline, the reminders and
 //   who it goes to next are all on the request.
 //
@@ -28,8 +30,8 @@
 //     policy AsksPeople       => IsStaff;      // puts requests to people
 //     policy OverseesRequests => IsLead;       // reads every request, calls one off, gives it more time
 package Osysharp.HumanRequests {
-  version     "1.4.0";
-  minPlatform "0.14.0";
+  version     "1.5.0";
+  minPlatform "0.19.0";
   summary     "requests put to people — a question with typed options, an approval bound to the exact version approved, a request for information or a document — from a person, a process or an agent, with a deadline in business hours, reminders and escalation; answered in the app's work queue or, with no account, through a link that opens that one request; the answer comes back typed to whatever waits for it, however long that takes.";
 
   model "model/**/*.osy";

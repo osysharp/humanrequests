@@ -51,6 +51,8 @@ public class RequestWords {
   /// What the form of a request for approval calls its two answers.
   public virtual string Approve() { return "Approve"; }
   public virtual string Reject() { return "Reject"; }
+  /// What a step to take is answered with.
+  public virtual string Done() { return "Done"; }
   /// What somebody reads after answering through a link.
   public virtual string Thanks() { return "Thank you. Your answer has been passed on."; }
   /// …and when their answer came after the request was closed.

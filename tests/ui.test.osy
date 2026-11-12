@@ -104,6 +104,56 @@ void whoever_asked_sees_who_it_waits_for_and_no_buttons() {
   runas (Edvin) { Assert.Equal("south-slip", OutcomeOf(TheRequest(id)).Choice); }
 }
 
+/// ⭐ OPTIONS WEIGHED, ONE RECOMMENDED. Each option says what happens, what is for and against it, and who acts; the
+/// recommended one is marked, its why is said, and one press accepts it.
+[Test(Yard)]
+void options_show_for_and_against_and_the_recommendation_is_accepted_with_one_press() {
+  Guid id = Guid.Empty;
+  runas (Joel) {
+    var request = AskWhichSlipWeighed(recommended: "south-slip", why: "Paint first, then launch.");
+    Workflow.Settle(request);
+    id = request.Id;
+  }
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Edvin);
+  Ui.Visit("/inbox/mine/i/" + id);
+  Assert.Visible("Recommended: South slip", within: "Recommendation");
+  Assert.Visible("Paint first, then launch.", within: "Recommendation");
+  Assert.Visible("The cradle fits her keel.", within: "North slip");
+  Assert.Visible("The paint shed is at the far end.", within: "North slip");
+  Assert.Visible("She waits for the slip to clear on Friday.", within: "South slip");
+  Assert.Visible("The yard crew", within: "South slip");
+  Assert.Visible("Recommended", within: "South slip");
+  Assert.NoOverflow();
+  Ui.Shot("request-recommended-wide-light");
+  Ui.Click("Accept recommendation");
+  Assert.Visible("South slip", within: "Answer");
+  runas (Joel) { Assert.Equal("south-slip", OutcomeOf(TheRequest(id)).Choice); }
+}
+
+/// ⭐ A STEP TO TAKE. What to do, where, and how to tell it worked — and Done.
+[Test(Yard)]
+void a_step_to_take_shows_what_where_and_how_to_tell_and_is_answered_done() {
+  Guid id = Guid.Empty;
+  runas (Joel) {
+    var request = AskToUnlockTheGate();
+    Workflow.Settle(request);
+    id = request.Id;
+  }
+  Ui.Viewport(390, 844);
+  Ui.SignInAs(Edvin);
+  Ui.Visit("/inbox/mine/i/" + id);
+  Assert.Visible("Joel Aro asks you to take a step", within: "Request");
+  Assert.Visible("Unlock the slipway gate with the brass key.", within: "The step");
+  Assert.Visible("The north slipway", within: "The step");
+  Assert.Visible("The gate stands open and the winch has power.", within: "The step");
+  Assert.NoOverflow();
+  Ui.Shot("request-step-phone-light");
+  Ui.Within("Your answer") { Ui.Click("Done"); }
+  Assert.Visible("Done", within: "Answer");
+  runas (Joel) { Assert.True(OutcomeOf(TheRequest(id)).StepTaken); }
+}
+
 /// ⭐ A FORM FROM A CLASS. The hand is asked for a boat's papers: one field per member of `BoatPapers`, each as its
 /// type asks. A field left empty is said by name; filled in, the answer is on the boat.
 [Test(Yard)]
