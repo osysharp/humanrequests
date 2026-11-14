@@ -21,6 +21,7 @@ public void EraseFromRequest(HumanRequest request, Guid? account, string why) {
   if (account != null) {
     if (request.To != null && request.To!.Id == account) { request.To = null; }
     if (request.AnsweredBy != null && request.AnsweredBy!.Id == account) { request.AnsweredBy = null; }
+    foreach (var given in GivenAnswer.Where(g => g.Request == request && g.AnsweredBy == account).ToList()) { given.Delete(); }
   }
   request.ErasedAt = DateTime.UtcNow;
   request.ErasedWhy = why.Trim();

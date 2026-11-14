@@ -250,6 +250,33 @@ public entity LateAnswer {
   }
 }
 
+/// ⭐ WHO ANSWERED, AS THE PLATFORM RECORDED IT — one row per request answered in the app, made by `RecordAnswer` in the
+/// answerer's own request, so its `[CreatedBy]` is whoever was signed in as they answered, written by the platform and
+/// by no code. `HumanRequest.AnsweredBy` says the same for a person to read; this is what code that acts on the answer
+/// FOR the answerer names them by: `onBehalfOf: given.AnsweredBy`, or `Records.CreatedBy(given)` in a kit handed it as
+/// "some record". An answer through a link has none: its holder is nobody in the app. It rolls up to its request
+/// (`Records.RollsUpTo`), so a kit handed it as "some record" can tell which request it answers.
+[Unique(Request)]
+public entity GivenAnswer {
+  [Required, Immutable, Index, RollsUpTo] HumanRequest Request;
+  [CreatedBy] Guid? AnsweredBy;
+
+  security {
+    allow read when IsAuthenticated where AnsweredBy == user || Request.AskedBy == user;
+    allow read when OverseesRequests || ErasesRequestRecords;
+    allow create when IsAuthenticated;
+    // SECURITY-INVARIANT(requests-who-answered-is-the-platforms-record): a `GivenAnswer` is made by `RecordAnswer` alone,
+    // in the answerer's own request — so the person it records is the one the platform saw sign in and answer, never one
+    // a caller names — and is never changed; it goes only when the person is erased from the request. Failure mode: code
+    // records an approval "by" somebody who never gave it, and what is done for the approver is done with their rights.
+    // Guarded by tests/security.test.osy `who_answered_is_recorded_by_the_platform_and_by_no_code`.
+    deny create except via RecordAnswer;
+    deny update;
+    allow delete when ErasesRequestRecords;
+    deny delete except via EraseFromRequest;
+  }
+}
+
 /// Where a wait on a request stands.
 public enum WaitStatus { Pending, Released }
 

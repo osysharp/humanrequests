@@ -237,6 +237,9 @@ public void ForgeAnswer(HumanRequest request) {
   request.AnsweredAt = DateTime.UtcNow;
 }
 
+/// Somebody's own code recording an answer "given" — not through answering.
+public void ForgeGivenAnswer(HumanRequest request) { new GivenAnswer { Request = request }; }
+
 /// An approval marked as used — or as not used — by hand.
 public void ForgeUse(HumanRequest request) { request.ActedAt = null; request.ActedVersion = ""; }
 

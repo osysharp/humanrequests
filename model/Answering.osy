@@ -174,7 +174,11 @@ internal AnswerResult RecordAnswer(HumanRequest request, RequestAnswer answer, P
   request.AnswerJson = fieldsJson;
   request.Comment = comment;
   // A link lets its holder write the answer and nothing about who they are inside the app: they are nobody there.
-  if (person != null) { request.AnsweredBy = person; }
+  if (person != null) {
+    request.AnsweredBy = person;
+    // …and the platform's own record of who it was: made here, in their request, so its `[CreatedBy]` is them.
+    new GivenAnswer { Request = request };
+  }
   request.AnsweredByName = Clip(name.Trim(), 200);
   request.AnsweredWith = with;
   request.AnsweredAt = RequestClock();

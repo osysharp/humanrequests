@@ -30,7 +30,7 @@
 //     policy AsksPeople       => IsStaff;      // puts requests to people
 //     policy OverseesRequests => IsLead;       // reads every request, calls one off, gives it more time
 package Osysharp.HumanRequests {
-  version     "1.5.0";
+  version     "1.6.0";
   minPlatform "0.19.0";
   summary     "requests put to people — a question with typed options, an approval bound to the exact version approved, a request for information or a document — from a person, a process or an agent, with a deadline in business hours, reminders and escalation; answered in the app's work queue or, with no account, through a link that opens that one request; the answer comes back typed to whatever waits for it, however long that takes.";
 

@@ -67,6 +67,21 @@ void an_answer_is_written_only_by_answering() {
   }
 }
 
+/// Who answered is the platform's record: made as the person signed in answers, naming them — and made by nothing else.
+[Test(Yard)]
+void who_answered_is_recorded_by_the_platform_and_by_no_code() {
+  Guid id = Guid.Empty;
+  runas (Edvin) { id = AskApproval(KeelBolts(), PersonNamed("Marit")).Id; }
+  runas (Marit) {
+    Assert.Denied(() => { ForgeGivenAnswer(TheRequest(id)); UnitOfWork.Commit(); });
+    UnitOfWork.Discard();
+    Assert.Equal(0, GivenAnswer.Count());
+    Assert.True(AnswerRequest(TheRequest(id), RequestAnswer.Approve()).Applied);
+    var given = GivenAnswer.Single(g => g.Request.Id == id);
+    Assert.Equal(PersonNamed("Marit").Id, given.AnsweredBy);
+  }
+}
+
 [Test(Yard)]
 void a_requests_time_is_changed_only_by_extending_it() {
   Guid id = Guid.Empty;
