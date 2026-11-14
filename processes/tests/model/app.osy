@@ -97,6 +97,9 @@ public enum HireStage {
 entity Hire {
   [Required, MaxLength(160)] string Title;
   [Required] Person Manager;
+  /// Who asked for the hire, as the platform recorded it: the manager, in her own request. The coordinator's work is
+  /// done for her through this record (`For(hire)`) — never through a field the app wrote.
+  [CreatedBy] Guid? AskedBy;
   [Required] Person Partner;
   [Required] Assignment Job;
   /// The monthly salary range the manager asked for, in kronor.
@@ -313,8 +316,9 @@ workflow Hiring {
 
   state Clarifying {
     enter {
-      // The work is done for the manager: what the coordinator asks, it asks her.
-      var role = await AssignedWork.Do(this.Item.Job, Agents.Of<HiringCoordinator>().For(this.Item.Manager), new ClarifyTheRole(), this.Item,
+      // The work is done for whoever asked for the hire — the manager, as the platform recorded her: what the
+      // coordinator asks, it asks her.
+      var role = await AssignedWork.Do(this.Item.Job, Agents.Of<HiringCoordinator>().For(this.Item), new ClarifyTheRole(), this.Item,
                                        key: "clarify", about: "What the role needs: " + this.Item.Title);
       if (!role.Done) { Processes.Problem("The role could not be clarified by the coordinator: " + role.Problem + " Applications are taken on the manager's request as it stands."); }
       MeetRoleIsClear(this.Item);
@@ -328,7 +332,8 @@ workflow Hiring {
   }
   state Screening {
     enter {
-      var read = await AssignedWork.Do(this.Item.Job, Agents.Of<HiringCoordinator>().For(this.Item.Partner), new ReadTheApplications(), this.Item,
+      // The reading is the coordinator's own work, for nobody: what it would ask goes to its sponsor.
+      var read = await AssignedWork.Do(this.Item.Job, Agents.Of<HiringCoordinator>(), new ReadTheApplications(), this.Item,
                                        key: "read", about: "The applications for " + this.Item.Title);
       // The reading is about every candidate whose application was in it — the app says so, once.
       AboutEveryCandidate(this.Item, read.Task);
@@ -374,8 +379,9 @@ workflow Hiring {
   }
   state Comparing {
     enter {
-      // The offer is the manager's to decide: the work is done for her, so what the coordinator proposes goes to her.
-      var compared = await AssignedWork.Do(this.Item.Job, Agents.Of<HiringCoordinator>().For(this.Item.Manager), new CompareTheCandidates(), this.Item,
+      // The offer is the manager's to decide: the work is done for whoever asked for the hire, so what the coordinator
+      // proposes goes to her.
+      var compared = await AssignedWork.Do(this.Item.Job, Agents.Of<HiringCoordinator>().For(this.Item), new CompareTheCandidates(), this.Item,
                                            key: "compare", about: "The candidates for " + this.Item.Title);
       if (!compared.Done || !OfferMadeNow(this.Item.Id)) {
         this.Item.Note = compared.Done ? "No offer was made." : "The candidates were not compared: " + compared.Problem;
