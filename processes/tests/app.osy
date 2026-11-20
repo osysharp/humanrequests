@@ -31,7 +31,7 @@ app Staffing {
   use Osysharp.Privacy.Llm@1;
   use Osysharp.Privacy.HumanRequests@1;
   use Osysharp.Mail@0;
-  use Osysharp.Llm@2;
+  use Osysharp.Llm@3;
   use Osysharp.Identity@0;
   use Osysharp.Organizations@0;
   use Osysharp.Organizations.ServicePlans@0;
